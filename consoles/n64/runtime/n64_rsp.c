@@ -1562,7 +1562,9 @@ uint32_t n64_rsp_run(n64_rsp *s, uint32_t cycles)
             case 0x27: r[rd] = ~(r[rs] | r[rt]); break;
             case 0x2A: r[rd] = (int32_t)r[rs] < (int32_t)r[rt]; break;
             case 0x2B: r[rd] = r[rs] < r[rt]; break;
-            default: break;
+            /* Every other SPECIAL minor opcode behaves as SRLV rd, rs, rs (rt ignored), not a no-op
+             * (sauraen/rsp_inval_instrs, measured on hardware). */
+            default: r[rd] = r[rs] >> (r[rs] & 31); break;
             }
             break;
         case 0x01: /* REGIMM */
