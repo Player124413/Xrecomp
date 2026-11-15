@@ -15,13 +15,13 @@
 #include <stdio.h>
 
 #ifndef GOLDEN_BUSY
-#define GOLDEN_BUSY 0x1A70E70Fu
+#define GOLDEN_BUSY 0xA5642C31u
 #endif
 #ifndef GOLDEN_GFX
-#define GOLDEN_GFX 0x370204FDu
+#define GOLDEN_GFX 0x871ABD43u
 #endif
 #ifndef GOLDEN_MATRIX
-#define GOLDEN_MATRIX 0x1DF30C72u
+#define GOLDEN_MATRIX 0x94D374F5u
 #endif
 /* The same on the Vulkan RDP (recorded with Mesa lavapipe; paraLLEl-RDP's output does not depend on the GPU). */
 #ifndef GOLDEN_BUSY_VK
@@ -57,9 +57,6 @@ static const struct {
                                       "n64_rdp.c's" },
     { "alpha compare (blend alpha threshold) and chroma key", "chroma key: not implemented by paraLLEl-RDP (its README); "
                                                               "n64_rdp.c approximates it" },
-    { "blender: alpha blend over memory (force blend and divided)", "blender without FORCE_BLEND on a fully covered "
-                                                                    "pixel: angrylion writes the pixel colour, "
-                                                                    "n64_rdp.c blends" },
 };
 static const char *known_why(void)
 {
@@ -755,7 +752,9 @@ static void t_blender(void)
     const_rect(OM_STD | OM_IMAGE_READ | OM_BLEND0(0, 0, 1, 0), CC_PASS(CC_PRIM, AC_PRIM), 8, 0);
     go();
     expect_rgb(64, 1, 1, 127, 0, 127);
-    expect_rgb(64, 9, 1, 127, 0, 127);
+    /* Without force blend the final cycle blends only an antialiased partial pixel: a fully covered one keeps the
+     * pixel colour (angrylion, paraLLEl-RDP; XBA-202). */
+    expect_rgb(64, 9, 1, 255, 0, 0);
 
     fresh("blender 16-bit with dither off");
     frame16(64, 64);

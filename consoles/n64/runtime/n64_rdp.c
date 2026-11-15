@@ -978,13 +978,23 @@ ALWAYS_INLINE void blend_cycle(const rdp_render *r, int cyc, int divide, int32_t
     }
 }
 
-ALWAYS_INLINE int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dzc_mem, int overflow)
+/* The final cycle's blend of P with A = pixel alpha, B = 1 - A leaves P as it is when that alpha is 255 (not
+ * P * 31/32 + M / 32): libdragon's test_rdpq_fog, paraLLEl-RDP's blender. */
+ALWAYS_INLINE int opaque_pixel(const rdp_render *r, int cyc)
+{
+    return r->bla[cyc] == &r->bpa && r->blb[cyc] == 0 && r->bpa == 255;
+}
+
+/* far: set to whether the pixel is not in front of memory by more than the delta Z (the blend of an antialiased edge
+ * over the same surface needs it). */
+ALWAYS_INLINE int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dzc_mem, int overflow, int *far)
 {
     int max_z = oz == 0x3FFFF;
     int32_t dzmax = (int32_t)(1u << (dzc_new > dzc_mem ? dzc_new : dzc_mem)) << 3;
     int infront = sz < oz;
     int nearer = (int32_t)sz - dzmax <= (int32_t)oz;
     int farther = (int32_t)sz + dzmax >= (int32_t)oz;
+    *far = farther;
     switch (mode) {
     case ZM_OPAQUE:
     case ZM_INTER: /* approximation: interpenetrating tests like opaque (no blend of the intersection) */
@@ -1002,6 +1012,14 @@ ALWAYS_INLINE int z_test(int mode, uint32_t sz, uint32_t oz, int dzc_new, int dz
 #define SPAN_CHUNK 64
 #define F_FAST 32u   /* span_fast: 16-bit pixels, no key / noise / LOD */
 #define F_SIMPLE 64u /* and no memory read, blending, alpha compare or coverage tricks: those branches compile away */
+
+/* Without antialiasing a pixel is drawn only when its first sample (sub-scanline 0, left) is covered: an edge pixel
+ * two primitives share is drawn once (libdragon's test_rdpq_blender_memory; paraLLEl-RDP, angrylion). */
+static inline int row_first_sample(const rdp_row *row, int x)
+{
+    int x8 = x * 8;
+    return (row->valid & 1) && x8 >= row->xl8[0] && x8 < row->xr8[0];
+}
 
 static inline int row_cvg(const rdp_row *row, int x)
 {
@@ -1082,7 +1100,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
     }
     for (int x = xc; x <= xe; x++) {
         int cvg = (x >= row->fx0 && x < row->fx1) ? 8 : row_cvg(row, x);
-        if (!cvg)
+        if (!cvg || (!M.aa && cvg < 8 && !row_first_sample(row, x)))
             goto next;
         uint32_t paddr = (ci_addr + ((row_off + (uint32_t)x) << ((F & F_32) ? 2 : ci8 ? 0 : 1))) & 0xFFFFFF;
         if (paddr + ((F & F_32) ? 3 : 1) >= size)
@@ -1112,7 +1130,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         }
         /* Z. */
         uint32_t z18 = 0, zaddr = 0;
-        int zok = 0;
+        int zok = 0, farther = 1;
         if (F & F_Z) {
             z18 = M.z_prim ? primz18 : a[A_Z] < 0 ? 0 : (uint32_t)a[A_Z] >> 13;
             zaddr = (zi_addr + ((row_off + (uint32_t)x) << 1)) & 0xFFFFFF;
@@ -1120,7 +1138,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
             if (M.z_compare && zok) {
                 uint16_t zm = n64_be16(ram + zaddr);
                 int dzm = (zm & 3) << 2 | hid[zaddr >> 1];
-                if (!z_test(M.z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8))
+                if (!z_test(M.z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8, &farther))
                     goto next;
             }
         }
@@ -1172,6 +1190,8 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         int pcvg = cvg;
         if (M.cvg_x_alpha)
             pcvg = (cvg * (col[3] + 1)) >> 8;
+        if (M.aa && !pcvg) /* coverage times alpha left nothing */
+            goto next;
         int alpha = M.alpha_cvg_sel ? imin(pcvg << 5, 255) : col[3];
         if (M.alpha_compare) {
             int thr = M.dither_alpha ? (int)(h >> 8 & 0xFF) : thr_blend;
@@ -1179,6 +1199,9 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
                 goto next;
         }
         int overflow = pcvg + memcvg >= 8;
+        /* The final cycle blends with force blend, or on an antialiased edge (coverage not full) over the same surface
+         * (the divided blend); otherwise its P input passes (paraLLEl-RDP, angrylion). */
+        const int blend_en = M.force_blend || (!overflow && M.aa && farther);
         /* Blender. */
         const int32_t *out;
         int32_t bo[3];
@@ -1195,7 +1218,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
                 blend_cycle(r, 0, 0, r->bc0);
                 fc = 1;
             }
-            if (M.force_blend || overflow) {
+            if (blend_en && !opaque_pixel(r, fc)) {
                 blend_cycle(r, fc, !M.force_blend, bo);
                 out = bo;
             } else {
@@ -1205,7 +1228,7 @@ ALWAYS_INLINE void span_std(rdp_render *r, const rdp_prim *p, const rdp_row *row
         /* Coverage to store. */
         int ncvg;
         switch (M.cvg_dest) {
-        case 0: ncvg = overflow ? 7 : pcvg + memcvg; break;
+        case 0: ncvg = blend_en ? imin(pcvg + memcvg, 7) : (pcvg - 1) & 7; break;
         case 1: ncvg = (pcvg + memcvg) & 7; break;
         case 2: ncvg = 7; break;
         default: ncvg = memcvg; break;
@@ -1350,7 +1373,7 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
     const int image_read = !SIMPLE && om->image_read, cvg_x_alpha = !SIMPLE && om->cvg_x_alpha;
     const int alpha_cvg_sel = !SIMPLE && om->alpha_cvg_sel, alpha_compare = !SIMPLE && om->alpha_compare;
     const int thr_blend = s->blend[3], cvg_dest = om->cvg_dest;
-    const int color_on_cvg = !SIMPLE && om->color_on_cvg, force_blend = om->force_blend;
+    const int color_on_cvg = !SIMPLE && om->color_on_cvg, force_blend = om->force_blend, aa_en = om->aa;
     const int dzc = p->dzc;
     const uint32_t primz18 = p->primz18;
     const uint16_t zlow = (uint16_t)(dzc >> 2);
@@ -1430,7 +1453,7 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
             if (F & F_Z)
                 az += dz;
             const int cvg = (x >= fx0 && x < fx1) ? 8 : row_cvg(row, x);
-            if (!cvg)
+            if (!cvg || (!aa_en && cvg < 8 && !row_first_sample(row, x)))
                 continue;
             int memcvg = 7;
             if (image_read) {
@@ -1439,12 +1462,13 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
                 memcvg = (v & 1) << 2 | hid[pa >> 1];
             }
             uint32_t z18 = 0;
+            int farther = 1;
             if (F & F_Z) {
                 z18 = z_prim ? primz18 : cz < 0 ? 0 : (uint32_t)cz >> 13;
                 if (z_compare) {
                     const uint16_t zm = n64_be16(ram + za);
                     const int dzm = (zm & 3) << 2 | hid[za >> 1];
-                    if (!z_test(z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8))
+                    if (!z_test(z_mode, z18, z_decompress(zm >> 2), dzc, dzm, cvg + memcvg >= 8, &farther))
                         continue;
                 }
             }
@@ -1489,10 +1513,13 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
             int pcvg = cvg;
             if (cvg_x_alpha)
                 pcvg = (cvg * (col[3] + 1)) >> 8;
+            if (aa_en && !pcvg)
+                continue;
             const int alpha = alpha_cvg_sel ? imin(pcvg << 5, 255) : col[3];
             if (alpha_compare && alpha < thr_blend)
                 continue;
             const int overflow = pcvg + memcvg >= 8;
+            const int blend_en = force_blend || (!overflow && aa_en && farther); /* span_std */
             int cr = col[0], cg = col[1], cb = col[2];
             if (!blend_pass) {
                 bcomb = pk4((uint32_t)col[0], (uint32_t)col[1], (uint32_t)col[2], 0);
@@ -1504,7 +1531,7 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
                     fc = 1;
                 }
                 uint64_t o;
-                if (force_blend || overflow) {
+                if (blend_en && !(bA[fc] == 0 && bB[fc] == 0 && alpha == 255)) { /* opaque_pixel */
                     const int a8 = bA[fc] == 0 ? alpha : bA[fc] == 1 ? fog_a : bA[fc] == 2 ? shade_a : 0;
                     o = blend_pk(*bP[fc], *bM[fc], a8, bB[fc], memcvg, !force_blend);
                 } else {
@@ -1516,7 +1543,7 @@ ALWAYS_INLINE void span_fast(rdp_render *r, const rdp_prim *p, const rdp_row *ro
             }
             int ncvg;
             switch (cvg_dest) {
-            case 0: ncvg = overflow ? 7 : pcvg + memcvg; break;
+            case 0: ncvg = blend_en ? imin(pcvg + memcvg, 7) : (pcvg - 1) & 7; break;
             case 1: ncvg = (pcvg + memcvg) & 7; break;
             case 2: ncvg = 7; break;
             default: ncvg = memcvg; break;
@@ -1984,13 +2011,15 @@ static void load_block(rdp_render *r, uint64_t w)
     const uint32_t src = s->ti_addr + (((tl * (uint32_t)s->ti_width + sl) << s->ti_size) >> 1);
     uint8_t *tm = s->tmem;
     uint32_t acc = 0;
-    if (s->ti_size == 3) { /* 4 texels per TMEM word of each half */
+    if (s->ti_size == 3) { /* each RDRAM word (2 texels) into a 32-bit word of each half */
         tmem_dirty(r, 0, 4096);
-        for (uint32_t wd = 0; wd < (n + 3) / 4; wd++) {
+        /* DxT counts RDRAM words, so the odd-line swap is decided per texel pair, not per 4-texel TMEM word
+         * (libdragon's test_rdpq_tex_upload RGBA32: the second line came out unswapped). */
+        for (uint32_t wd = 0; wd < (n + 1) / 2; wd++) {
             uint32_t x = (acc >> 11) & 1 ? 4 : 0;
             acc += dxt;
-            for (uint32_t k = 0; k < 4; k++) {
-                uint32_t o = (t->tmem + wd * 8 + k * 2) ^ x, sa = src + (wd * 4 + k) * 4;
+            for (uint32_t k = 0; k < 2; k++) {
+                uint32_t o = (t->tmem + wd * 4 + k * 2) ^ x, sa = src + (wd * 2 + k) * 4;
                 tm[o & 0x7FF] = ram8(r, sa);
                 tm[(o + 1) & 0x7FF] = ram8(r, sa + 1);
                 tm[0x800 | (o & 0x7FF)] = ram8(r, sa + 2);
