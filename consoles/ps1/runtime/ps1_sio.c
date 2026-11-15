@@ -24,6 +24,11 @@
  * ready and only then for the IRQ. */
 #define ACK_DELAY 100
 
+/* JOY_STAT bit 7 is the /ACK input level, not a latch: the device holds /ACK low for a short pulse only (psx-spx
+ * « Controllers and Memory Cards »: about 2 us, some 68 CPU cycles), then releases it while the IRQ (bit 9) stays
+ * until JOY_CTRL bit 4. Code that waits for /ACK high again with interrupts off (Duke Nukem - Time to Kill's libcard
+ * hook in the card IRQ handler) hangs on a latch. PS1_SIO_ACK_PULSE (ps1_internal.h) CPU cycles from the IRQ. */
+
 void ps1_card_format(uint8_t *d)
 {
     memset(d, 0, PS1_CARD_SIZE);
@@ -325,6 +330,7 @@ void ps1_sio_event(ps1_machine *m)
     }
     s->ack_pending = false;
     s->ack = true;
+    s->done_at = m->cycles + PS1_SIO_ACK_PULSE; /* /ACK low until then (not scheduled: neither busy nor pending) */
     if (s->ctrl & 0x1000) {
         s->stat_irq = 1;
         ps1_irq_raise(m, PS1_IRQ_SIO0);
@@ -339,7 +345,7 @@ static uint32_t stat(ps1_machine *m)
         v |= 0x2;
     if (!s->busy)
         v |= 0x4;
-    if (s->ack)
+    if (s->ack && m->cycles < s->done_at)
         v |= 0x80;
     if (s->stat_irq)
         v |= 0x200;

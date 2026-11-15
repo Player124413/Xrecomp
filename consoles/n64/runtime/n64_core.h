@@ -150,6 +150,23 @@ void n64_run_cycles(n64_machine *m, uint64_t cycles);
  * max_w x max_h. Returns 0 and the size, or -1 when the VI is blank (w / h then a default size). With the Vulkan RDP
  * upscaling (n64_rdp.h n64_rdp_scanout_scale > 0) and a buffer that holds it, its VI's picture at the upscaled size. */
 int n64_display(n64_machine *m, uint32_t *xrgb, int max_w, int max_h, int *w, int *h);
+/* n64_display's upscaled picture (the Vulkan RDP's scanout, n64_rdp.h n64_rdp_scanout_scale) without its copies:
+ * *rgba points at the RDP's own RGBA8 bytes (r, g, b, a; show it opaque), *w x *h, rows *pitch bytes apart, valid
+ * until the second picture after it (n64_rdp_scanout_rgba). 0; -2 when there is no upscaled scanout now (none, or
+ * interlaced): n64_display then; -1 when the upscaled scanout shows nothing: n64_display with a 1x buffer then (as
+ * n64_display would fall back to). Counts as n64_display for n64_display_changed when it returns 0. */
+int n64_display_rgba(n64_machine *m, const uint8_t **rgba, int *w, int *h, int *pitch);
+/* 0 when n64_display would now give the same picture as at its last call, 1 when it may differ (or there was none).
+ * Conservative: 1 unless all of these are as they were then: the VI registers that shape the picture (V_CURRENT
+ * aside), the back end and its scanout scale (the caller's buffer the same as then); the field order is not tracked, so an
+ * interlaced mode is always 1; the RDRAM the VI reads (its lines and the filters' neighbours) was not written: by
+ * the CPU, lifted code or a PI / SI DMA (per 4 KB page: n64_core's write counters, which a state load, a reset and
+ * n64_rdram move too), nor by the RDP or SP DMA (their exact bus.wrote ranges), and no row the RDP has drawn but
+ * not yet reported (n64_rdp.h n64_rdp_unreported; the software RDP is flushed) overlaps it. With an upscaled scanout
+ * a non-RCP write keeps it 1 until the VI has shown the RDP's next SYNC_FULL (paraLLEl-RDP takes such writes into its
+ * upscaled copy at its next pass). The gamma dither noise of the 1x VI (a function of the frame) is not a change.
+ * Host-only (no effect on the machine). The runtime makes, converts and uploads a picture only when this says so. */
+int n64_display_changed(n64_machine *m);
 /* The framebuffer the VI scans (ORIGIN, WIDTH and the pixel type of its registers), raw: 0x00RRGGBB from its top-left
  * pixel, WIDTH (at most max_w) wide and max_h lines (fewer at the end of RDRAM), no VI filter or scaling (XBA-202:
  * test ROMs whose references are framebuffer dumps). Returns 0 and the size, or -1 when the VI is blank. */
@@ -232,9 +249,11 @@ uint64_t n64_instructions(n64_machine *m);
 typedef struct n64_perf {
     uint64_t frames;           /* n64_run_frame calls */
     uint64_t timed;            /* of those, the frames whose stages were timed */
-    uint64_t cpu_ns;           /* in the timed frames: the CPU (interpreter or pack: n64_cpu_run) */
-    uint64_t rsp_ns;           /* the RSP (n64_rsp_run) */
-    uint64_t rdp_ns;           /* the RDP (n64_rdp_run: the software RDP draws there, the Vulkan RDP queues) */
+    uint64_t cpu_ns;           /* in the timed frames: the CPU (interpreter or pack: n64_cpu_run), its RDP runs out */
+    uint64_t rsp_ns;           /* the RSP (n64_rsp_run), without the RDP runs its DPC_END writes start */
+    uint64_t rdp_ns;           /* the RDP: every n64_rdp_run (after an RSP slice, and those the RSP's or the CPU's
+                                * DPC_END writes start); the software RDP draws there, the Vulkan RDP queues (and
+                                * blocks on a full command ring, rdp_queue_ns) and waits at SYNC_FULL */
     uint64_t frame_ns;         /* the whole n64_run_frame (the scheduler, VI / AI / PI / SI events included) */
     uint64_t rsp_instructions; /* every frame: RSP instructions run */
     uint64_t rdp_commands;     /* RDP commands run (n64_rdp_get_stats) */
@@ -243,9 +262,39 @@ typedef struct n64_perf {
      * their time, wherever they happen: in n64_rdp_run, and those the VI asks for (n64_display, save states). */
     uint64_t rdp_waits;
     uint64_t rdp_wait_ns;
+    /* The Vulkan RDP (n64_rdp.h n64_rdp_stats, every frame): waits for room in its full command ring (inside
+     * rdp_ns, not in rdp_wait_ns), its upscaled scanouts (their wait is part of rdp_wait_ns), stalled pipeline
+     * compiles. */
+    uint64_t rdp_queue_waits, rdp_queue_ns;
+    uint64_t rdp_scanouts, rdp_scanout_ns;
+    uint64_t rdp_stalled_compiles, rdp_stalled_compile_ns;
+    /* The deferred DP interrupt (n64_set_rdp_defer): SYNC_FULLs whose DP interrupt the policy put off to a deadline,
+     * those completed at once (the policy said now), those completed before their deadline (a save state), pictures
+     * that came later while deferring (the policy then stops for a while); the back end's waits for the GPU at the
+     * deadlines and their time (n64_rdp_stats dp_*, inside rdp_ns). */
+    uint64_t dp_deferred, dp_now, dp_early, dp_backoffs;
+    uint64_t rdp_dp_waits, rdp_dp_wait_ns;
+    uint64_t rdp_prefetches, rdp_prefetch_hits; /* early scanouts started, taken (n64_rdp.h n64_rdp_scanout_prefetch) */
 } n64_perf;
 void n64_perf_enable(n64_machine *m, int every);
+
 void n64_perf_get(n64_machine *m, n64_perf *out);
+
+/* Deferred DP interrupt (n64_core.c « Deferred DP interrupt »): an RDP back end that can let the GPU finish a SYNC_FULL
+ * later (the Vulkan RDP: n64_devices.h bus.defer_dp) asks the core at each SYNC_FULL; the core answers from emulated
+ * facts only. When the game shows a picture at most every second VI, each picture had exactly one SYNC_FULL, at least
+ * two VI interrupts before the next VI_ORIGIN change (the game did not swap at the first VI after the RDP was done),
+ * and that held for the last 3 pictures, a second after reset or a state load, the DP interrupt comes at the next VI
+ * interrupt plus offset_pm / 1000 of a VI (default 62: 1/16), and the GPU's work is waited for there, after the host's
+ * frame pacing, instead of inside the frame that queued it. Otherwise (a picture every VI, several SYNC_FULLs per
+ * picture, a game that swaps as soon as the RDP is done), at once as before. A picture that comes later than before
+ * while deferring stops it for 500 VIs. mode: N64_DP_DEFER_OFF, or N64_DP_DEFER_AUTO with offset_pm 1..1000 (0: the
+ * default). n64_create takes $RECOMP_N64_RDP_DEFER: "0" (off), "auto" (default), or a percentage of a VI for the
+ * offset (1..100). No effect with the software RDP. */
+enum { N64_DP_DEFER_OFF = 0, N64_DP_DEFER_AUTO = 1 };
+void n64_set_rdp_defer(n64_machine *m, int mode, int offset_pm);
+/* $RECOMP_N64_RDP_DEFER as above: the mode, and the offset (per mille) through *offset_pm. NULL / "" / "auto": auto. */
+int n64_rdp_defer_parse(const char *s, int *offset_pm);
 
 /* Guest health, for the runtime's diagnostics (no effect on the machine).
  * n64_guest_fault_info: the first exception of a kind a healthy game does not take (TLB refill / invalid / modified,

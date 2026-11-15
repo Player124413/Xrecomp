@@ -390,7 +390,7 @@
     <string name="VKD_LAST_UNSUPPORTED">Non compatible avec le rendu N64 : à son dernier démarrage, ce pilote s\'est chargé, mais le rendu Vulkan de la Nintendo 64 (paraLLEl-RDP) ne peut pas tourner dessus. Le pilote du système a été utilisé.</string>
     <string name="VKD_LAST_OPEN_FAILED">À son dernier démarrage, ce pilote n\'a pas pu être ouvert : le pilote du système a été utilisé.</string>
     <string name="ROM_OPT_VK_DRIVER_DETAIL">Le pilote Vulkan qu\'utilise le rendu Vulkan Nintendo 64 de ce jeu : comme dans Réglages › Graphismes › Pilote Vulkan, celui de l\'appareil (Système), ou l\'un des pilotes installés. S\'applique au prochain lancement du jeu.</string>
-    <string name="MENU_VK_DRIVER">Pilote Vulkan (au prochain lancement)</string>
+    <string name="MENU_VK_DRIVER">Pilote Vulkan</string>
     <string name="VKD_INSTALLED_HELP">A : en faire le pilote par défaut de tous les jeux (un jeu peut avoir le sien dans ses Options). X deux fois : le supprimer (les jeux qui l\'avaient choisi reprennent celui par défaut).</string>
     <string name="VKD_KV_VERSION">Version</string>
     <string name="VKD_KV_SOURCE">Source</string>

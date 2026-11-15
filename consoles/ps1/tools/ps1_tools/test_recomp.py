@@ -13,7 +13,7 @@ import pytest
 from ps1_tools import isa
 from ps1_tools.discover import Discovery, Image, bios_stub, merge_records, recomp_hash
 from ps1_tools.exe import Disc, Exe, load_input
-from ps1_tools.recomp import build_functions, main, read_discovered, recompile
+from ps1_tools.recomp import build_functions, main, merge_variants, read_discovered, recompile
 
 RUNTIME = os.path.join(os.path.dirname(__file__), "..", "..", "runtime")
 
@@ -282,6 +282,16 @@ def test_generated_code_is_not_lifted(tmp_path):
     funcs, stats = build_functions(exe, recs)
     assert stats["volatile_addresses"] == 1
     assert not [f for f in funcs if f.image.origin == "ram"]
+
+
+def test_same_code_recorded_again_is_one_content():
+    # an older runtime recorded one PC again under several lengths (views into other records): one content
+    exe = Exe(make_exe(words([JR_RA, NOP])))
+    code = overlay(0)
+    recs = [(0x80100000, code[:n]) for n in (len(code), 16, 8, 12)] * 3
+    assert merge_variants(recs) == {0x80100000: [code]}
+    funcs, stats = build_functions(exe, recs)
+    assert stats["volatile_addresses"] == 0 and stats["records"] == 1
 
 
 def test_cli_and_c_compiles(tmp_path, capsys):

@@ -56,8 +56,12 @@ void n64_vi_write(n64_machine *m, uint32_t reg, uint32_t v)
     switch (reg) {
     case 0: m->vi[0] = v & 0x1FBFF; break;
     case 1:
-        if ((v & 0x00FFFFFF) != m->vi[1])
+        if ((v & 0x00FFFFFF) != m->vi[1]) {
             m->vi_origin_changes++;
+            n64_dp_origin(m);
+            m->vi[1] = v & 0x00FFFFFF;
+            n64_vi_origin_changed(m);
+        }
         m->vi[1] = v & 0x00FFFFFF;
         break;
     case 2: m->vi[2] = v & 0xFFF; break;
@@ -84,6 +88,7 @@ void n64_vi_event(n64_machine *m)
             m->frame_done = true; /* V_INTR out of range: a field is still a frame */
     }
     if (m->vi_line == intr_line) {
+        n64_dp_vi(m, m->ev[EV_VI]);
         n64_mi_raise(m, N64_MI_VI);
         m->frame_done = true;
     }

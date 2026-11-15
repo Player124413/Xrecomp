@@ -129,6 +129,8 @@ static pthread_mutex_t s_last_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *s_last;
 static size_t s_last_cap;
 static int s_last_w, s_last_h, s_last_anum, s_last_aden;
+static host_window_last_fn s_last_fn; /* host_window_present_rgba_shared: the caller has the picture */
+static void *s_last_user;
 
 static int env_set(const char *name)
 {
@@ -271,6 +273,47 @@ static void shader_free(void)
 {
     for (int i = 0; i < HOST_SHADER_COUNT; i++)
         present_shader_release(&s_sprog[i], 0);
+}
+
+/* ── Live picture changes (the in-game menu) ─────────────────────────────
+ * host_window_request_picture may come from any thread (Android's UI thread); the presenting thread takes the
+ * request at its next present (live_take), so scale, filter and shader only ever change between two frames. */
+static pthread_mutex_t s_live_mu = PTHREAD_MUTEX_INITIALIZER;
+static int s_live_pending;               /* atomic: a request waits */
+static int s_live_scale = -1, s_live_filter = -1, s_live_has_shader;
+static HostShader s_live_shader;
+
+void host_window_request_picture(int scale, int filter, const HostShader *s)
+{
+    pthread_mutex_lock(&s_live_mu);
+    s_live_scale = scale;
+    s_live_filter = filter;
+    s_live_has_shader = s != NULL;
+    if (s)
+        s_live_shader = *s;
+    pthread_mutex_unlock(&s_live_mu);
+    __atomic_store_n(&s_live_pending, 1, __ATOMIC_RELEASE);
+}
+
+static void live_take(void)
+{
+    int scale, filter, has;
+    HostShader sh;
+
+    if (!__atomic_load_n(&s_live_pending, __ATOMIC_ACQUIRE))
+        return;
+    pthread_mutex_lock(&s_live_mu);
+    __atomic_store_n(&s_live_pending, 0, __ATOMIC_RELAXED);
+    scale = s_live_scale;
+    filter = s_live_filter;
+    has = s_live_has_shader;
+    sh = s_live_shader;
+    pthread_mutex_unlock(&s_live_mu);
+    host_window_set_scaling(scale < 0 ? s_scale : scale, filter < 0 ? s_filter : filter);
+    if (has)
+        host_window_set_shader(&sh);
+    fprintf(stderr, "  [HOST] window: picture changed live: scale %d, filter %d, shader %s\n", s_scale, s_filter,
+            host_window_shader_name(s_shader.preset));
 }
 
 /* LCD ghosting wants the previous picture: present_rgba then alternates between two textures. */
@@ -475,6 +518,20 @@ static void keep_last(const uint8_t *px, int w, int h, int pitch)
     s_last_h = h;
     s_last_anum = s_aspect_num;
     s_last_aden = s_aspect_den;
+    s_last_fn = NULL;
+    pthread_mutex_unlock(&s_last_mu);
+}
+
+/* host_window_present_rgba_shared: no copy, the caller's `last` gives the picture on demand. */
+static void keep_shared(host_window_last_fn fn, void *user, int w, int h)
+{
+    pthread_mutex_lock(&s_last_mu);
+    s_last_fn = fn;
+    s_last_user = user;
+    s_last_w = w;
+    s_last_h = h;
+    s_last_anum = s_aspect_num;
+    s_last_aden = s_aspect_den;
     pthread_mutex_unlock(&s_last_mu);
 }
 
@@ -562,8 +619,13 @@ static int draw(unsigned tex, unsigned prev, int w, int h, int top_down)
 
 int host_window_present_texture(unsigned tex, int w, int h, int top_down)
 {
+    live_take();
     return draw(tex, 0, w, h, top_down);
 }
+
+/* The last upload_draw's texture pair and size, for host_window_present_again. */
+static unsigned s_again_tex, s_again_prev;
+static int s_again_w, s_again_h;
 
 /* Uploads RGBA pixels into the window's texture and draws it. */
 static int upload_draw(const void *px, int w, int h, int pitch)
@@ -611,7 +673,11 @@ static int upload_draw(const void *px, int w, int h, int pitch)
         s_gl.TexSubImage2D(XGL_TEXTURE_2D, 0, 0, 0, w, h, XGL_RGBA, XGL_UNSIGNED_BYTE, px);
     }
     s_gl.PixelStorei(XGL_UNPACK_ROW_LENGTH, 0);
-    return draw(s_tex, ghost && s_tex_prev_w == w && s_tex_prev_h == h ? s_tex_prev : 0, w, h, 1);
+    s_again_tex = s_tex;
+    s_again_prev = ghost && s_tex_prev_w == w && s_tex_prev_h == h ? s_tex_prev : 0;
+    s_again_w = w;
+    s_again_h = h;
+    return draw(s_again_tex, s_again_prev, w, h, 1);
 }
 
 #if defined(XBOXRECOMP_LSFG)
@@ -738,11 +804,63 @@ int host_window_present_rgba(const void *px, int w, int h, int pitch)
     if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
         return 0;
     keep_last(px, w, h, pitch);   /* the real picture, for host_window_screenshot_bmp */
+    live_take();
 #if defined(XBOXRECOMP_LSFG)
     if (fg_present(px, w, h, pitch))
         return 1;
 #endif
     return upload_draw(px, w, h, pitch);
+}
+
+int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, host_window_last_fn last, void *user)
+{
+    if (!s_win || !px || w <= 0 || h <= 0 || pitch < w * 4)
+        return 0;
+    if (last)
+        keep_shared(last, user, w, h);
+    else
+        keep_last(px, w, h, pitch);
+#if defined(XBOXRECOMP_LSFG)
+    if (fg_present(px, w, h, pitch))
+        return 1;
+#endif
+    return upload_draw(px, w, h, pitch);
+}
+
+/* The shared picture as a kept copy (the caller's pixels are about to go). */
+void host_window_keep_shared(void)
+{
+    pthread_mutex_lock(&s_last_mu);
+    host_window_last_fn fn = s_last_fn;
+    void *user = s_last_user;
+    int anum = s_last_anum, aden = s_last_aden;
+    s_last_fn = NULL;
+    pthread_mutex_unlock(&s_last_mu);
+    uint8_t *px = NULL;
+    int w = 0, h = 0;
+    if (!fn || fn(user, &px, &w, &h) != 0 || !px) {
+        free(px);
+        return;
+    }
+    int keep_num = s_aspect_num, keep_den = s_aspect_den;
+    s_aspect_num = anum; /* the shape it was shown at */
+    s_aspect_den = aden;
+    keep_last(px, w, h, w * 4);
+    s_aspect_num = keep_num;
+    s_aspect_den = keep_den;
+    free(px);
+}
+
+int host_window_present_again(void)
+{
+    if (!s_win || !s_again_tex)
+        return 0;
+    live_take();
+#if defined(XBOXRECOMP_LSFG)
+    if (s_fg && framegen_pacer_active() && !recomp_ff_active())
+        return 1; /* the pacer draws its FIFO at its due times (host_window_sleep_until): nothing new to give it */
+#endif
+    return draw(s_again_tex, s_again_prev, s_again_w, s_again_h, 1);
 }
 
 void host_window_sleep_until(uint64_t deadline_ns)
@@ -907,15 +1025,23 @@ int host_window_screenshot_bmp(const char *path)
     if (!path || !path[0])
         return -1;
     pthread_mutex_lock(&s_last_mu);
+    host_window_last_fn fn = s_last_fn;
+    void *user = s_last_user;
     w = s_last_w;
     h = s_last_h;
     anum = s_last_anum;
     aden = s_last_aden;
-    if (s_last && w > 0 && h > 0 && (px = malloc((size_t)w * h * 4)))
+    if (!fn && s_last && w > 0 && h > 0 && (px = malloc((size_t)w * h * 4)))
         memcpy(px, s_last, (size_t)w * h * 4);
     pthread_mutex_unlock(&s_last_mu);
-    if (!px)
+    if (fn && fn(user, &px, &w, &h) != 0) { /* the caller's picture (host_window_present_rgba_shared) */
+        free(px);
+        px = NULL;
+    }
+    if (!px || w <= 0 || h <= 0) {
+        free(px);
         return -1;
+    }
 
     /* The shape it was shown at: the height kept and the width following, or the width kept when that would
      * make it narrower than it is. */
@@ -1010,6 +1136,7 @@ void host_window_close(void)
     s_last = NULL;
     s_last_cap = 0;
     s_last_w = s_last_h = 0;
+    s_last_fn = NULL;
     pthread_mutex_unlock(&s_last_mu);
     SDL_DelEventWatch(lifecycle_watch, NULL);
     host_pad_shutdown();
@@ -1033,6 +1160,7 @@ void host_window_close(void)
     s_tex_filter = -1;
     s_tex_prev = 0;
     s_tex_prev_w = s_tex_prev_h = 0;
+    s_again_tex = s_again_prev = 0;
     s_tex_prev_filter = -1;
     memset(s_sprog, 0, sizeof s_sprog);   /* a context that could not be made current: built again next time */
     memset(&s_gl, 0, sizeof s_gl);

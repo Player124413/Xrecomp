@@ -128,12 +128,16 @@ typedef struct ps1_card {
     uint8_t flag;       /* FLAG byte: bit 3 = directory not read since insertion */
 } ps1_card;
 
+/* CPU cycles the device holds /ACK low (JOY_STAT bit 7) from the IRQ: psx-spx « Controllers and Memory Cards »
+ * gives about 2 us (68 cycles at 33.8688 MHz); a little more so a poll right after the IRQ still sees it. */
+#define PS1_SIO_ACK_PULSE 100
+
 typedef struct ps1_sio {
     uint16_t mode, ctrl, baud;
     uint16_t stat_irq;  /* JOY_STAT bit 9 */
     uint8_t rx;         /* the received byte */
     bool rx_full;
-    bool ack;           /* /ACK seen for the last byte (JOY_STAT bit 7) */
+    bool ack;           /* /ACK seen for the last byte: JOY_STAT bit 7 while cycles < done_at (the pulse) */
     bool busy;          /* transfer in flight until done_at */
     bool ack_pending;   /* the device's /ACK comes at done_at */
     uint64_t done_at;

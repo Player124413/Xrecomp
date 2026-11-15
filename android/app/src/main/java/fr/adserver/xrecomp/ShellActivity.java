@@ -19,7 +19,9 @@ import org.libsdl.app.SDLControllerManager;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -40,7 +42,7 @@ public class ShellActivity extends SDLActivity {
     private CompanionPanel panel;
     private GameMenu menu;
     /** The overlay pad both the companion panel and the on-screen pad drive (XBA-42). */
-    private final OverlayMixer mixer = new OverlayMixer(new NativeOverlay());
+    private final OverlayMixer mixer = new OverlayMixer(new NativeOverlay(this));
     private TouchControls touch;
     /** « shell: fps N » every 10 s while started, panel or not (Device check: fps with the panel on and off). */
     private final android.os.Handler fpsLog = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -277,6 +279,8 @@ public class ShellActivity extends SDLActivity {
      * in its Options, else Settings' choice, else the system driver: VkDrivers.resolve) is a still installed one,
      * RECOMP_VK_DRIVER_DIR / _LIB / _ID and RECOMP_VK_HOOK_DIR; otherwise all four unset, also
      * clearing what a previous game of this process had. RECOMP_VK_DRIVER=system in recomp.cfg still wins natively.
+     * For every N64 game RECOMP_VK_CACHE_DIR too (VkDrivers.cacheEnv, under getCacheDir()): the compiled shaders of
+     * the last start, so the next one does not compile them again.
      * A game's own app uses its own files/vk_drivers (the driver it took from XRecomp).
      */
     private void applyVkDriver(boolean romLaunch) {
@@ -287,7 +291,9 @@ public class ShellActivity extends SDLActivity {
         VkDrivers drivers = VkDrivers.of(this);
         VkDrivers.Driver d = n64 ? drivers.resolve(tid) : null;
         String own = n64 ? drivers.gameChoice(tid) : null;
-        for (String[] kv : VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir)) {
+        List<String[]> env = new ArrayList<>(VkDrivers.runEnv(d, getApplicationInfo().nativeLibraryDir));
+        env.add(VkDrivers.cacheEnv(d, n64 ? getCacheDir() : null));
+        for (String[] kv : env) {
             try {
                 if (kv[1] != null)
                     Os.setenv(kv[0], kv[1], true);
@@ -345,10 +351,12 @@ public class ShellActivity extends SDLActivity {
 
     /**
      * RECOMP_STATE_RESUME for a GBA / PS1 / N64 runtime (recomp_states.h): « 1 » when « Resume where I left off » is
-     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise.
+     * on, so the automatic slot the menu saved when the player left is loaded before the first frame; unset otherwise,
+     * and for a launch from the Home's « Start » (GameStore.takeFreshStart, one launch only).
      */
     private void applyAutoResume(boolean consoleGame) {
-        boolean on = consoleGame && GameStore.autoResume(this);
+        boolean fresh = GameStore.takeFreshStart(this);
+        boolean on = consoleGame && GameStore.autoResume(this) && !fresh;
         try {
             if (on)
                 Os.setenv("RECOMP_STATE_RESUME", "1", true);
@@ -357,7 +365,7 @@ public class ShellActivity extends SDLActivity {
         } catch (ErrnoException e) {
             Log.w(LauncherActivity.TAG, "shell: cannot set RECOMP_STATE_RESUME", e);
         }
-        Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : "off"));
+        Log.i(LauncherActivity.TAG, "shell: resume where I left off " + (on ? "on" : fresh ? "off (Start)" : "off"));
     }
 
     /**
@@ -430,6 +438,8 @@ public class ShellActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         SystemBars.hide(this);
+        if (touch != null)
+            touch.closeEditor("resumed");   // never left over the game (XBA-212)
         if (menu != null)
             menu.onResume();
     }
@@ -520,13 +530,13 @@ public class ShellActivity extends SDLActivity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent e) {
         boolean down = e.getActionMasked() == MotionEvent.ACTION_DOWN;
-        if (touch != null && touch.editor != null) {   // the touch layout editor: no menu swipe, nothing to the game
+        // The touch layout editor (no menu swipe, nothing to the game), or a tap revealing a hidden pad (XBA-212).
+        if (touch != null && touch.takeTouch(e, menu != null && menu.isOpen())) {
             if (down && touchDebug)
-                Log.d(TouchPadView.DEBUG_TAG, "shell: down to the touch layout editor");
-            return touch.editor.dispatchTouchEvent(e);
+                Log.d(TouchPadView.DEBUG_TAG, "shell: down taken by the " + (touch.editor != null
+                                              ? "touch layout editor" : "on-screen pad's reveal"));
+            return true;
         }
-        if (touch != null && down)
-            touch.onTouch();
         if (menu != null && menu.dispatchTouch(e)) {
             if (down && touchDebug)
                 Log.d(TouchPadView.DEBUG_TAG, "shell: down taken by the menu's swipe");
@@ -644,6 +654,12 @@ public class ShellActivity extends SDLActivity {
         public void setTouchShown(boolean on) {
             if (touch != null)
                 touch.force(on);
+        }
+
+        @Override
+        public void menuOpened() {
+            if (touch != null)
+                touch.closeEditor("menu opened");
         }
 
         @Override
@@ -782,6 +798,20 @@ public class ShellActivity extends SDLActivity {
                 finish();
             }
         }
+
+        @Override
+        public void setPicture(ConsoleVideo.Picture p) {
+            try {
+                MenuNative.nativeSetPicture(p.xbox, p.scale, p.filter, p.shader, p.strength, p.curvature, p.ghosting);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w(LauncherActivity.TAG, "shell: menu: the picture cannot be changed live", e);
+            }
+        }
+
+        @Override
+        public void restartGame() {
+            ShellActivity.this.restartGame(null);   // as the title's quick reboot: a new process, the same game
+        }
     }
 
     /**
@@ -841,7 +871,12 @@ public class ShellActivity extends SDLActivity {
     /** The overlay pad (input_overlay.h) through CompanionNative. */
     private static final class NativeOverlay implements OverlayMixer.Sink {
         private final boolean debug = TouchPadView.debugOn();
+        private final android.content.Context context;
         private boolean failed;
+
+        NativeOverlay(android.content.Context context) {
+            this.context = context;
+        }
 
         @Override
         public void pad(int buttons, int analogMask, int lt, int rt, int lx, int ly, int rx, int ry) {
@@ -869,9 +904,16 @@ public class ShellActivity extends SDLActivity {
 
         /** Once per process: the on-screen pad and the panel cannot reach the game (said, not swallowed). */
         private void failed(UnsatisfiedLinkError e) {
-            if (!failed)
-                Log.e(LauncherActivity.TAG, "shell: overlay pad: no native call, touch input cannot reach the game", e);
+            if (failed)
+                return;
             failed = true;
+            Log.e(LauncherActivity.TAG, "shell: overlay pad: no native call, touch input cannot reach the game", e);
+            try {   // said on screen too, once (XBA-212): the player would only see a pad that does nothing
+                android.widget.Toast.makeText(context, R.string.TOUCH_NATIVE_FAILED, android.widget.Toast.LENGTH_LONG)
+                    .show();
+            } catch (RuntimeException t) {
+                Log.w(LauncherActivity.TAG, "shell: overlay pad: no toast", t);
+            }
         }
     }
 

@@ -659,12 +659,20 @@ int main(int argc, char **argv)
         double tf = p.timed ? 1e6 * (double)p.timed : 1.0, nf = p.frames ? (double)p.frames : 1.0;
         double other = (double)p.frame_ns - (double)p.cpu_ns - (double)p.rsp_ns - (double)p.rdp_ns;
         printf("perf: cpu %.2f rsp %.2f rdp %.2f sched %.2f (frame %.2f) ms per timed frame (%llu of %llu), "
-               "rdp wait %.2f ms/frame (%llu waits); %.0f RSP instructions, %.0f RDP commands, %.2f full syncs "
-               "per frame\n",
+               "rdp wait %.2f ms/frame (%llu waits; queue %.2f, scanout %.2f ms/frame); %.0f RSP instructions, "
+               "%.0f RDP commands, %.2f full syncs per frame; %llu stalled compiles (%.0f ms)\n",
                (double)p.cpu_ns / tf, (double)p.rsp_ns / tf, (double)p.rdp_ns / tf, other / tf,
                (double)p.frame_ns / tf, (unsigned long long)p.timed, (unsigned long long)p.frames,
-               (double)p.rdp_wait_ns / 1e6 / nf, (unsigned long long)p.rdp_waits, (double)p.rsp_instructions / nf,
-               (double)p.rdp_commands / nf, (double)p.rdp_full_syncs / nf);
+               (double)p.rdp_wait_ns / 1e6 / nf, (unsigned long long)p.rdp_waits, (double)p.rdp_queue_ns / 1e6 / nf,
+               (double)p.rdp_scanout_ns / 1e6 / nf, (double)p.rsp_instructions / nf, (double)p.rdp_commands / nf,
+               (double)p.rdp_full_syncs / nf, (unsigned long long)p.rdp_stalled_compiles,
+               (double)p.rdp_stalled_compile_ns / 1e6);
+        printf("perf: DP %llu deferred, %llu at once, %llu early, %llu backoffs; %llu deadline waits %.1f ms; %llu "
+               "early scanouts of %llu scanouts (%llu started)\n",
+               (unsigned long long)p.dp_deferred, (unsigned long long)p.dp_now, (unsigned long long)p.dp_early,
+               (unsigned long long)p.dp_backoffs, (unsigned long long)p.rdp_dp_waits, (double)p.rdp_dp_wait_ns / 1e6,
+               (unsigned long long)p.rdp_prefetch_hits, (unsigned long long)p.rdp_scanouts,
+               (unsigned long long)p.rdp_prefetches);
     }
     if (pack && stats) {
         n64_recomp_stats st;

@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #include "ps1_core.h"
 #include "ps1_pack.h"
+#include "ps1_recomp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,6 +223,61 @@ static ps1_machine *machine(void)
     return m;
 }
 
+static int count_lines(const char *path, const char *prefix)
+{
+    FILE *f = fopen(path, "r");
+    char line[8192];
+    int n = 0;
+    while (f && fgets(line, sizeof line, f))
+        n += !strncmp(line, prefix, strlen(prefix));
+    if (f)
+        fclose(f);
+    return n;
+}
+
+/* P (0x80011300) is reached three times, each right after a new record of code around it (A0 / A1 / A2, many
+ * records in between so none is a view into the one before): as a view into each, three lengths, the same bytes.
+ * One record (views of other lengths used to be recorded again, and counted as variants). */
+static void test_record_once(const char *root)
+{
+    ps1_machine *m = machine();
+    if (!m)
+        return;
+    const uint32_t A[3] = {0x80011000u, 0x80011100u, 0x80011200u}, P = 0x80011300u;
+    const uint32_t JR_RA = 0x03E00008u;
+    uint32_t pc = 0x80010000u, filler = 0x80030000u;
+#define JAL(t) (0x0C000000u | (((t) >> 2) & 0x3FFFFFFu))
+    for (int round = 0; round < 3; round++) {
+        ps1_poke32(m, A[round], JR_RA);
+        ps1_poke32(m, A[round] + 4, 0);
+        ps1_poke32(m, pc, JAL(A[round]));
+        ps1_poke32(m, pc + 4, 0);
+        ps1_poke32(m, pc + 8, JAL(P));
+        ps1_poke32(m, pc + 12, 0);
+        pc += 16;
+        for (int k = 0; k < 40; k++, filler += 0x800, pc += 8) {
+            ps1_poke32(m, filler, JR_RA);
+            ps1_poke32(m, filler + 4, 0);
+            ps1_poke32(m, pc, JAL(filler));
+            ps1_poke32(m, pc + 4, 0);
+        }
+    }
+#undef JAL
+    ps1_poke32(m, pc, 0x1000FFFFu);
+    ps1_poke32(m, pc + 4, 0);
+    ps1_poke32(m, P, JR_RA);
+    ps1_poke32(m, P + 4, 0);
+    static const ps1_recomp_table t = {PS1_RECOMP_ABI, 0, NULL, "", 0x80010000u};
+    CHECK(ps1_attach_recomp(m, &t) == 0);
+    ps1_run_cycles(m, 400000);
+    char path[1300];
+    snprintf(path, sizeof path, "%s/record_once.txt", root);
+    CHECK(ps1_recomp_write_missed(m, path) > 120);
+    CHECK(count_lines(path, "80011300 ") == 1);
+    CHECK(count_lines(path, "80011000 ") == 1 && count_lines(path, "80011200 ") == 1);
+    ps1_destroy(m);
+}
+
 int main(int argc, char **argv)
 {
     char root[] = "/tmp/ps1_pack_testXXXXXX", dir[1200], lib[1300], why[512], json[1300];
@@ -237,6 +293,7 @@ int main(int argc, char **argv)
     CHECK(mkdtemp(root) != NULL);
     test_sha256();
     test_disc_boot(root, argc > 2 ? argv[2] : NULL);
+    test_record_once(root);
     CHECK(strlen(ps1_pack_host_abi()) > 0 && strcmp(ps1_pack_host_abi(), "unknown") != 0);
 
     setenv("FAKE_PACK_SRC_SHA", hex, 1);

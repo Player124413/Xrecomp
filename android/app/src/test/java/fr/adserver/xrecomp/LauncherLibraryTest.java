@@ -1163,4 +1163,28 @@ public class LauncherLibraryTest {
         assertEquals(rom.getAbsolutePath(), GameStore.launchedRom(app));
         assertEquals(key, GameStore.launchedTitleId(app));
     }
+
+    /** A Ready game's preparation on its card and the bottom screen: Prepared OK, out of date WARN, Not prepared neutral. */
+    @Test
+    public void preparedChipColours() {
+        LibraryScreen.Entry e = new LibraryScreen.Entry("n64-NSME-635A2BFF");
+        e.chip = GameState.Chip.READY;
+        assertEquals(Theme.OK, LibraryScreen.chipColor(e));
+        assertFalse("a plain « Ready » is not shown", LibraryScreen.chipShown(e));
+        assertEquals(app.getString(R.string.STATE_READY), LibraryScreen.chipText(app, e));
+        e.prepared = GameState.Prepared.PREPARED;
+        assertEquals(Theme.OK, LibraryScreen.chipColor(e));
+        assertTrue(LibraryScreen.chipShown(e));
+        assertEquals(app.getString(R.string.LIB_CHIP_PREPARED), LibraryScreen.chipText(app, e));
+        e.prepared = GameState.Prepared.OUTDATED;
+        assertEquals(Theme.WARN, LibraryScreen.chipColor(e));
+        assertEquals(app.getString(R.string.LIB_CHIP_OUTDATED), LibraryScreen.chipText(app, e));
+        e.prepared = GameState.Prepared.NOT_PREPARED;
+        assertEquals(Theme.TEXT_DIM, LibraryScreen.chipColor(e));
+        assertEquals(app.getString(R.string.LIB_CHIP_NOT_PREPARED), LibraryScreen.chipText(app, e));
+        e.prepared = GameState.Prepared.NONE;
+        e.chip = GameState.Chip.NEEDS_PREPARING;
+        assertEquals(Theme.WARN, LibraryScreen.chipColor(e));
+        assertEquals(app.getString(R.string.CHIP_NEEDS_PREPARE), LibraryScreen.chipText(app, e));
+    }
 }

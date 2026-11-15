@@ -24,10 +24,10 @@
     <string name="MENU_WIDESCREEN">Widescreen</string>
     <string name="MENU_480P" translatable="false">480p</string>
     <string name="MENU_VIDEO_FOLLOW">As in Settings</string>
-    <!-- XBA-181: a GBA, PS1 or N64 game's own scale and filter, from its next start. -->
-    <string name="MENU_SCALE">Scale (next start)</string>
-    <string name="MENU_FILTER">Filter (next start)</string>
-    <string name="MENU_UPSCALE">Resolution (next start)</string>
+    <!-- XBA-181: a GBA, PS1 or N64 game's own scale and filter (shown at once) and resolution (after a restart). -->
+    <string name="MENU_SCALE">Scale</string>
+    <string name="MENU_FILTER">Filter</string>
+    <string name="MENU_UPSCALE">Resolution</string>
     <string name="MENU_BACK">Back</string>
     <string name="MENU_HINT_SELECT">Select</string>
     <string name="MENU_HINT_BACK">Back</string>
@@ -65,5 +65,9 @@
     <string name="MENU_STATE_RESUME_FAILED">Could not resume: the game starts from the beginning</string>
     <string name="MENU_RESUME_AUTO">Resume where I left off</string>
     <string name="MENU_QUIT_CONFIRM_KEPT">Your place is kept for next time</string>
-    <string name="MENU_SHADER">Picture shader (next start)</string>
+    <string name="MENU_RESTART_APPLY">Restart to apply</string>
+    <string name="MENU_RESTART_APPLY_SUB">Some changes are waiting for it</string>
+    <string name="MENU_RESTART_CONFIRM">Press again to restart</string>
+    <string name="MENU_RESTART_KEPT">The game picks up where you are</string>
+    <string name="MENU_SHADER">Picture shader</string>
 </resources>

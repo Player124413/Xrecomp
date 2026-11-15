@@ -134,6 +134,8 @@ public:
 	bool has_pipeline_failure() const;
 	bool uses_subgroups() const;
 	bool uses_ubershader() const;
+	// xboxrecomp-android patch: the time enqueue_command spent waiting for room in the full command ring.
+	void get_ring_blocked(uint64_t &waits, uint64_t &ns) const;
 
 	// Synchronization.
 	void flush();

@@ -1,8 +1,10 @@
 /* test_vk_driver.c -- the custom Vulkan driver selection of the N64 RDP (n64_vk_driver.h): the RECOMP_VK_* variables,
- * the trial marker, last_start and <id>.status. Off Android libxba_vkdriver.so does not exist, so every open that gets
+ * the trial marker, last_start and <id>.status; and the pipeline cache file (n64_vk_cache.h: RECOMP_VK_CACHE_DIR, load,
+ * save, truncated / foreign / corrupt files, MESA_SHADER_CACHE_DIR). Off Android libxba_vkdriver.so does not exist, so every open that gets
  * that far fails as a driver that cannot be opened on a device does: the system-driver path (open_failed). With
  * --wrapper, a fake libxba_vkdriver.so (fake_vkdriver.c, found through LD_LIBRARY_PATH / DYLD_LIBRARY_PATH) opens it:
  * the outcomes the RDP reports afterwards (ok, unsupported, not_loaded). No Vulkan needed. */
+#include "n64_vk_cache.h"
 #include "n64_vk_driver.h"
 
 #include <stdio.h>
@@ -56,6 +58,153 @@ static void clear(void)
     remove(p);
     snprintf(p, sizeof p, "%s/myid.status", root);
     remove(p);
+}
+
+static long file_size(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (long)st.st_size : -1;
+}
+
+static void truncate_to(const char *path, long n)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned char buf[4096];
+    size_t got = f ? fread(buf, 1, sizeof buf, f) : 0;
+    if (f)
+        fclose(f);
+    f = fopen(path, "wb");
+    fwrite(buf, 1, (size_t)n < got ? (size_t)n : got, f);
+    fclose(f);
+}
+
+/* n64_vk_cache.h: the directory (created, nested), the file's name, a save then a load, and every file that must be
+ * ignored rather than handed to the driver. */
+static void cache_tests(const char *base)
+{
+    char dir[700], path[900], want[900];
+    const char *why = "";
+    size_t n = 0;
+    uint8_t uuid[N64_VK_CACHE_UUID_SIZE], other[N64_VK_CACHE_UUID_SIZE];
+    for (int i = 0; i < N64_VK_CACHE_UUID_SIZE; i++) {
+        uuid[i] = (uint8_t)(0xA0 + i);
+        other[i] = (uint8_t)i;
+    }
+    uint8_t blob[1000];
+    for (size_t i = 0; i < sizeof blob; i++)
+        blob[i] = (uint8_t)(i * 7 + 3);
+
+    /* unset or empty: no directory, no file, no Mesa variable */
+    unsetenv("RECOMP_VK_CACHE_DIR");
+    unsetenv("MESA_SHADER_CACHE_DIR");
+    CHECK(!n64_vk_cache_dir(dir, sizeof dir));
+    CHECK(!n64_vk_cache_file(path, sizeof path, uuid));
+    n64_vk_cache_mesa_env();
+    CHECK(getenv("MESA_SHADER_CACHE_DIR") == NULL);
+    setenv("RECOMP_VK_CACHE_DIR", "", 1);
+    CHECK(!n64_vk_cache_dir(dir, sizeof dir));
+
+    /* nested and missing, without the trailing '/': created, '/' added */
+    char set[700];
+    snprintf(set, sizeof set, "%s/cache/vk_cache/system", base);
+    setenv("RECOMP_VK_CACHE_DIR", set, 1);
+    CHECK(n64_vk_cache_dir(dir, sizeof dir));
+    snprintf(want, sizeof want, "%s/", set);
+    CHECK(!strcmp(dir, want));
+    struct stat st;
+    CHECK(stat(set, &st) == 0 && S_ISDIR(st.st_mode));
+    /* a buffer too small for it: refused, not cut */
+    char small[8];
+    CHECK(!n64_vk_cache_dir(small, sizeof small));
+
+    CHECK(n64_vk_cache_file(path, sizeof path, uuid));
+    snprintf(want, sizeof want, "%s/pipelines-a0a1a2a3a4a5a6a7a8a9aaabacadaeaf.bin", set);
+    CHECK(!strcmp(path, want));
+
+    /* no file yet */
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "none") && n == 0);
+
+    /* saved, loaded back byte for byte; no temporary file left */
+    CHECK(n64_vk_cache_save(path, uuid, blob, sizeof blob) == 0);
+    CHECK(file_size(path) == N64_VK_CACHE_HEADER + (long)sizeof blob);
+    uint8_t *got = n64_vk_cache_load(path, uuid, &n, &why);
+    CHECK(got && n == sizeof blob && !memcmp(got, blob, n) && !strcmp(why, "ok"));
+    free(got);
+    char tmpf[1000];
+    snprintf(tmpf, sizeof tmpf, "%s.tmp%ld", path, (long)getpid());
+    CHECK(access(tmpf, F_OK) != 0);
+
+    /* saved again (a larger cache): replaced whole */
+    uint8_t big[3000];
+    for (size_t i = 0; i < sizeof big; i++)
+        big[i] = (uint8_t)(i ^ 0x5A);
+    CHECK(n64_vk_cache_save(path, uuid, big, sizeof big) == 0);
+    got = n64_vk_cache_load(path, uuid, &n, &why);
+    CHECK(got && n == sizeof big && !memcmp(got, big, n));
+    free(got);
+
+    /* another device or driver (UUID) */
+    CHECK(n64_vk_cache_load(path, other, &n, &why) == NULL && !strcmp(why, "another device or driver"));
+
+    /* truncated inside the payload, inside the header, empty */
+    truncate_to(path, N64_VK_CACHE_HEADER + 100);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "truncated") && n == 0);
+    truncate_to(path, 20);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "truncated"));
+    truncate_to(path, 0);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "truncated"));
+
+    /* a longer file, a flipped payload byte, another format */
+    CHECK(n64_vk_cache_save(path, uuid, blob, sizeof blob) == 0);
+    FILE *f = fopen(path, "ab");
+    fputc(0, f);
+    fclose(f);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "not a cache file"));
+    CHECK(n64_vk_cache_save(path, uuid, blob, sizeof blob) == 0);
+    f = fopen(path, "r+b");
+    fseek(f, N64_VK_CACHE_HEADER + 500, SEEK_SET);
+    fputc(blob[500] ^ 1, f);
+    fclose(f);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "checksum"));
+    f = fopen(path, "wb");
+    fputs("Granite's own pipeline_cache.bin, or anything else of some length", f);
+    fclose(f);
+    CHECK(n64_vk_cache_load(path, uuid, &n, &why) == NULL && !strcmp(why, "not a cache file"));
+    /* and the next save replaces it */
+    CHECK(n64_vk_cache_save(path, uuid, blob, sizeof blob) == 0);
+    got = n64_vk_cache_load(path, uuid, &n, &why);
+    CHECK(got && n == sizeof blob);
+    free(got);
+
+    /* a directory that cannot be written: the save fails, nothing is left */
+    char ro[800], ropath[900];
+    snprintf(ro, sizeof ro, "%s/cache/ro", base);
+    mkdir(ro, 0500);
+    snprintf(ropath, sizeof ropath, "%s/pipelines-x.bin", ro);
+    if (geteuid() != 0) /* root writes anywhere */
+        CHECK(n64_vk_cache_save(ropath, uuid, blob, sizeof blob) != 0);
+    CHECK(access(ropath, F_OK) != 0 || geteuid() == 0);
+    remove(ropath);
+    rmdir(ro);
+
+    /* Mesa's disk cache: <dir>mesa, created; a value already set wins */
+    n64_vk_cache_mesa_env();
+    snprintf(want, sizeof want, "%s/mesa", set);
+    CHECK(getenv("MESA_SHADER_CACHE_DIR") && !strcmp(getenv("MESA_SHADER_CACHE_DIR"), want));
+    CHECK(stat(want, &st) == 0 && S_ISDIR(st.st_mode));
+    setenv("MESA_SHADER_CACHE_DIR", "/elsewhere", 1);
+    n64_vk_cache_mesa_env();
+    CHECK(!strcmp(getenv("MESA_SHADER_CACHE_DIR"), "/elsewhere"));
+    unsetenv("MESA_SHADER_CACHE_DIR");
+    unsetenv("RECOMP_VK_CACHE_DIR");
+
+    remove(path);
+    rmdir(want);
+    rmdir(set);
+    snprintf(want, sizeof want, "%s/cache/vk_cache", base);
+    rmdir(want);
+    snprintf(want, sizeof want, "%s/cache", base);
+    rmdir(want);
 }
 
 /* The fake wrapper opens the driver: the marker is written, n64_vk_driver_done gives the outcome. */
@@ -139,6 +288,8 @@ int main(int argc, char **argv)
         printf("n64_vk_driver --wrapper: ok\n");
         return 0;
     }
+
+    cache_tests(base);
 
     /* nothing selected: no open, no file */
     CHECK(!n64_vk_driver_selected());

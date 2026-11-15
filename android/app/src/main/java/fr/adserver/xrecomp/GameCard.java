@@ -16,8 +16,8 @@ import android.view.View;
 /**
  * One game of the library grid (docs/android/app-shell.md « Game library »): its title image (TitleArt's cached PNG)
  * or a monogram on the title ID's hue, its title on one line, and under it its state (GameState) as a dot and a label
- * — only when it is not « Ready »; when the library holds games of several consoles, the console's short name as a
- * badge in the art's top left corner (XBA-178); a favourite's star in its top right one (XBA-206). Focusable: it grows a little when focused, and the launcher's Glide draws a ring
+ * — not for a plain « Ready » (a game the app can prepare says Prepared, Prepared · out of date or Not prepared);
+ * when the library holds games of several consoles, the console's short name as a badge in the art's top left corner (XBA-178); a favourite's star in its top right one (XBA-206). Focusable: it grows a little when focused, and the launcher's Glide draws a ring
  * around its art. Colours are read from Theme when drawn (the library is always in the stock colours).
  */
 final class GameCard extends View {
@@ -87,7 +87,7 @@ final class GameCard extends View {
         return this;
     }
 
-    /** Whether the state line shows (not for « Ready »: only a state worth saying is drawn). */
+    /** Whether the state line shows (not for a plain « Ready »: only a state worth saying is drawn). */
     void setChipShown(boolean shown) {
         chipShown = shown;
         invalidate();

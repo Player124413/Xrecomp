@@ -13,9 +13,15 @@
  * every word is byte-swapped on the way, the GPU copy is in host words). Coherence with the CPU:
  *   - SYNC_FULL: the commands are flushed and the CPU waits for the GPU and for the write-back (wait_for_timeline),
  *     then the DP interrupt is raised: whatever the game reads after the interrupt (frame buffer, RDRAM the recompiled
- *     code may run from) is in the array;
- *   - n64_rdp_flush (the VI is about to read the frame buffer, n64_display): commands queued since the last SYNC_FULL
- *     are drawn and waited for;
+ *     code may run from) is in the array. When the core defers it (bus.defer_dp, n64_core.c « Deferred DP
+ *     interrupt »), only the timeline is signalled; the wait, the rows' report, the busy bits and the interrupt come at
+ *     the core's deadline (dp_finish through n64_rdp_dp_complete), or when a second SYNC_FULL comes first;
+ *   - n64_rdp_flush (the VI is about to read the frame buffer and rows drawn there are not in RDRAM yet, a save
+ *     state): commands queued since the last SYNC_FULL, and a deferred SYNC_FULL's, are drawn and waited for (its
+ *     interrupt still at its deadline);
+ *   - early scanout (n64_rdp_scanout_prefetch): at a VI_ORIGIN change with nothing queued, the upscaled scanout is
+ *     submitted at once into one of two buffers; vk_scanout waits for its fence instead of draining the command ring
+ *     behind the next picture's work, unless the registers differ or rows were drawn where it reads since;
  *   - CPU writes (textures, command lists) are seen by the GPU when the commands that read them are flushed, which is
  *     at the latest at SYNC_FULL: as on the hardware, the game must not change what the RDP has not read yet.
  * Write tracking: the colour and Z image rows the drawing commands cover (scissored) are reported through bus.wrote
@@ -37,27 +43,46 @@
  *
  * Internal resolution (XBA-185, n64_rdp.h): with a factor of 2, 4 or 8 (n64_rdp_upscale_wanted) paraLLEl-RDP draws
  * each frame-buffer pass twice, at 1x into RDRAM as above (what the game reads back) and upscaled into GPU buffers of
- * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout, read back for n64_display). The
+ * RDRAM's size times the factor squared, which its own VI scans out (vk_scanout_rgba: into one of two kept host
+ * buffers, read where the GPU copied them by n64_display / n64_display_rgba). The
  * factor is lowered first when those buffers exceed the device's storage buffer range or half its largest
  * device-local heap (fit_upscale, logged). The check at create then draws into a 256-pixel-wide frame buffer (the
  * width paraLLEl-RDP upscales from) and scans it out, so the upscaled and VI pipelines are compiled and checked too;
- * a try that fails upscaled is made again at 1x. */
+ * a try that fails upscaled is made again at 1x.
+ *
+ * Pipeline cache (n64_vk_cache.h): with RECOMP_VK_CACHE_DIR, the device's VkPipelineCache starts from
+ * pipelines-<pipelineCacheUUID>.bin there (before the first command processor, so the check's pipelines come from it)
+ * and the cache is written back when it grew: after the check passed, every 10 s from a thread of its own (the
+ * compiles during the game), when the app pauses (n64_rdp_save_caches: sessions on Android end killed after a pause)
+ * and at destroy. MESA_SHADER_CACHE_DIR points Mesa's own disk cache (Turnip) at <dir>mesa before the driver opens.
+ *
+ * Threads (n64_rdp.h n64_rdp_set_thread_hook): paraLLEl-RDP's command ring worker, fence executor and pipeline
+ * compile worker call the same hook as the software RDP's band threads when they start and end (RDP::set_thread_hook,
+ * our patch in third_party/parallel-rdp): on Android they join the performance session, nice -8 and the fast cores
+ * after a resume. */
 #include "n64_rdp_backend.h"
 #include "n64_rdp.h"
+#include "n64_vk_cache.h"
 #include "n64_vk_driver.h"
 
+#include "command_buffer.hpp"
 #include "context.hpp"
 #include "device.hpp"
 #include "rdp_device.hpp"
+#include "thread_hook.hpp"
 #include "thread_id.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -84,7 +109,14 @@ struct VkRdp {
     uint32_t pend[44]{}; /* one command, 32-bit words (high word first), up to 22 64-bit words */
     int npend = 0;       /* 64-bit words collected */
     bool unsynced = false; /* commands queued since the last wait */
+    /* Deferred DP interrupt (n64_devices.h bus.defer_dp): dp_owed from a deferred SYNC_FULL to n64_rdp_dp_complete
+     * (busy bits kept, no interrupt yet); dp_gpu while its work (timeline dp_timeline) is not waited for; dp_wr its
+     * rows, reported once waited; dp_after: commands queued since (they keep the busy bits). */
+    bool dp_owed = false, dp_gpu = false, dp_after = false;
+    uint64_t dp_timeline = 0;
+    uint32_t dp_wr_lo[2]{}, dp_wr_hi[2]{};
     n64_rdp_stats stats{}; /* host counters (n64_rdp_get_stats), not in save states */
+    uint64_t stalls0 = 0, stall_ns0 = 0; /* get_stalled_compiles at create (vk_stats reports the difference) */
 
     /* Front-end view of the state, for the costs and the written ranges (as in n64_rdp.c). */
     int fe_cycle = 0, fe_ci_size = 2, fe_ci_width = 320, fe_zon = 0, fe_sc_y0 = 0, fe_sc_y1 = 0xFFF;
@@ -109,6 +141,21 @@ struct VkRdp {
     int upscale = 1;
     unsigned down_steps = 0;
     std::vector<RDP::RGBA> scan;
+    /* Early scanout (n64_rdp_scanout_prefetch): two buffers taken in turn, the one prefetched (pf_valid), the
+     * registers, field and RDRAM range it is of, pf_dirty once the RDP drew into that range. */
+    RDP::VIScanoutBuffer pf[2];
+    int pf_cur = 0;
+    bool pf_valid = false, pf_dirty = false;
+    uint32_t pf_vi[14]{}, pf_field = 0, pf_lo = 0, pf_hi = 0;
+
+    /* Pipeline cache file (n64_vk_cache.h): its path ("": none), the size of the data it holds (Granite's blob), the
+     * thread that saves it when it grew (pc_cv, pc_quit under g_pc_mu). */
+    std::string pc_path;
+    size_t pc_size = 0;
+    bool pc_no_data_logged = false;
+    std::thread pc_thread;
+    std::condition_variable pc_cv;
+    bool pc_quit = false;
 };
 
 /* Granite records command buffers per registered thread index: whichever thread drives the RDP is index 0, like
@@ -148,6 +195,8 @@ void wrote_add(VkRdp *d, int y0, int y1)
     const int n = d->fe_zon && d->fe_cycle != CYC_FILL && d->fe_cycle != CYC_COPY ? 2 : 1;
     for (int i = 0; i < n; i++) {
         uint32_t lo = base[i] + (uint32_t)y0 * stride[i], hi = base[i] + (uint32_t)(y1 + 1) * stride[i];
+        if (d->pf_valid && lo < d->pf_hi && d->pf_lo < hi)
+            d->pf_dirty = true; /* the prefetched scanout no longer shows what is there */
         if (d->wr_hi[i] <= d->wr_lo[i]) {
             d->wr_lo[i] = lo;
             d->wr_hi[i] = hi;
@@ -167,6 +216,16 @@ void wrote_report(VkRdp *d)
     }
 }
 
+/* A deferred SYNC_FULL's rows, once its work is waited for. */
+void dp_wrote_report(VkRdp *d)
+{
+    for (int i = 0; i < 2; i++) {
+        if (d->dp_wr_hi[i] > d->dp_wr_lo[i] && d->bus.wrote)
+            d->bus.wrote(d->bus.ctx, d->dp_wr_lo[i], d->dp_wr_hi[i] - d->dp_wr_lo[i]);
+        d->dp_wr_lo[i] = d->dp_wr_hi[i] = 0;
+    }
+}
+
 /* Everything queued is drawn and written back into the core's RDRAM. */
 uint64_t host_ns()
 {
@@ -175,23 +234,60 @@ uint64_t host_ns()
         .count();
 }
 
+void check_failure(VkRdp *d)
+{
+    if (!d->failed && d->cp->has_pipeline_failure()) {
+        d->failed = true;
+        fprintf(stderr, "n64: Vulkan RDP: a shader failed to compile on %s during the game (the Granite lines "
+                        "above name it); switching to the software RDP\n",
+                d->dev->get_gpu_properties().deviceName);
+    }
+}
+
+/* Everything queued is drawn and written back into the core's RDRAM, a deferred SYNC_FULL's work included (whose DP
+ * interrupt still comes at its deadline: dp_finish). */
 void sync(VkRdp *d)
 {
-    if (d->unsynced) {
+    if (d->unsynced || d->dp_gpu) {
         on_thread();
         const uint64_t t0 = host_ns();
-        d->cp->wait_for_timeline(d->cp->signal_timeline());
+        d->cp->wait_for_timeline(d->unsynced ? d->cp->signal_timeline() : d->dp_timeline);
         d->stats.waits++;
         d->stats.wait_ns += host_ns() - t0;
         d->unsynced = false;
-        if (!d->failed && d->cp->has_pipeline_failure()) {
-            d->failed = true;
-            fprintf(stderr, "n64: Vulkan RDP: a shader failed to compile on %s during the game (the Granite lines "
-                            "above name it); switching to the software RDP\n",
-                    d->dev->get_gpu_properties().deviceName);
-        }
+        d->dp_gpu = false;
+        check_failure(d);
     }
+    dp_wrote_report(d);
     wrote_report(d);
+}
+
+/* The deferred SYNC_FULL completes (n64_rdp_dp_complete, or a second SYNC_FULL before the deadline): its work waited
+ * for, its rows reported, the busy bits cleared (unless commands came since), the DP interrupt. */
+void dp_finish(VkRdp *d)
+{
+    if (!d->dp_owed)
+        return;
+    d->dp_owed = false;
+    if (d->dp_gpu) {
+        on_thread();
+        const uint64_t t0 = host_ns();
+        d->cp->wait_for_timeline(d->dp_timeline);
+        const uint64_t dt = host_ns() - t0;
+        d->stats.dp_wait_ns += dt;
+        d->stats.dp_waits += dt >= 100000; /* 0.1 ms: the GPU was still at it */
+        d->dp_gpu = false;
+        check_failure(d);
+    }
+    dp_wrote_report(d);
+    if (!d->unsynced)
+        d->cp->begin_frame_context(); /* recycles the per-frame Vulkan objects (nothing is in flight now) */
+    if (!d->dp_after)
+        d->status &= ~(ST_PIPE_BUSY | ST_GCLK);
+    d->dp_after = false;
+    d->stats.dp_completed++;
+    if (d->bus.raise)
+        d->bus.raise(d->bus.ctx, N64_MI_DP);
 }
 
 /* ---- Internal resolution (XBA-185) ---------------------------------------------------------------------------------- */
@@ -291,8 +387,11 @@ void scanout_rgb(VkRdp *d, const uint32_t *vi, uint32_t field, unsigned *sw, uns
     so.downscale_steps = d->down_steps;
     const uint64_t t0 = host_ns();
     d->cp->scanout_sync(d->scan, *sw, *sh, so);
+    const uint64_t dt = host_ns() - t0;
     d->stats.waits++;
-    d->stats.wait_ns += host_ns() - t0;
+    d->stats.wait_ns += dt;
+    d->stats.scanouts++;
+    d->stats.scanout_ns += dt;
 }
 
 /* ---- The check at create -------------------------------------------------------------------------------------------- */
@@ -477,13 +576,32 @@ void dispatch(VkRdp *d, const uint32_t *w, int len)
     shadow_record(d, w0);
     d->cp->enqueue_command((unsigned)len * 2, w);
     d->unsynced = true;
-    if (id == 0x29) { /* SYNC_FULL: drawn and in RDRAM, then the DP interrupt */
-        sync(d);
-        d->cp->begin_frame_context(); /* recycles the per-frame Vulkan objects (nothing is in flight now) */
-        d->status &= ~(ST_PIPE_BUSY | ST_GCLK);
-        if (d->bus.raise)
-            d->bus.raise(d->bus.ctx, N64_MI_DP);
+    if (id != 0x29) {
+        d->dp_after |= d->dp_owed;
+        return;
     }
+    /* SYNC_FULL: drawn and in RDRAM, then the DP interrupt; or, when the core defers it (bus.defer_dp), the work is
+     * only handed to the GPU and dp_finish does the rest at the deadline. */
+    dp_finish(d); /* one at a time: an earlier deferred one completes now */
+    if (!d->failed && d->bus.defer_dp && d->bus.defer_dp(d->bus.ctx)) {
+        on_thread();
+        d->dp_timeline = d->cp->signal_timeline();
+        d->dp_gpu = true;
+        d->dp_owed = true;
+        d->dp_after = false;
+        d->unsynced = false;
+        for (int i = 0; i < 2; i++) {
+            d->dp_wr_lo[i] = d->wr_lo[i];
+            d->dp_wr_hi[i] = d->wr_hi[i];
+            d->wr_lo[i] = d->wr_hi[i] = 0;
+        }
+        return;
+    }
+    sync(d);
+    d->cp->begin_frame_context(); /* recycles the per-frame Vulkan objects (nothing is in flight now) */
+    d->status &= ~(ST_PIPE_BUSY | ST_GCLK);
+    if (d->bus.raise)
+        d->bus.raise(d->bus.ctx, N64_MI_DP);
 }
 
 void fetch64(const VkRdp *d, uint32_t a, uint32_t *hi, uint32_t *lo)
@@ -517,6 +635,120 @@ bool ubershader_draws_wrong(Vulkan::Device *dev)
     return dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR;
 }
 
+/* ---- Pipeline cache (n64_vk_cache.h) -------------------------------------------------------------------------------- */
+std::mutex g_pc_mu;         /* every save; g_pc_live; the pc_cv waits */
+VkRdp *g_pc_live = nullptr; /* the RDP n64_rdp_vk_save_caches saves: from vk_create's success to vk_destroy */
+constexpr size_t PC_EMPTY = 16 + 8 + 32; /* Granite's UUID and hash, a Vulkan cache header: nothing compiled in it */
+
+/* The device's VkPipelineCache, from the file when there is a whole one of this device and driver, else empty. Without
+ * RECOMP_VK_CACHE_DIR, none (as before). Right after set_context: before any pipeline is made. */
+void pc_load(VkRdp *d)
+{
+    d->pc_path.clear();
+    d->pc_size = 0;
+    const uint8_t *uuid = d->dev->get_gpu_properties().pipelineCacheUUID;
+    char path[1200];
+    if (!n64_vk_cache_file(path, sizeof path, uuid))
+        return;
+    size_t n = 0;
+    const char *why = "";
+    uint8_t *data = static_cast<uint8_t *>(n64_vk_cache_load(path, uuid, &n, &why));
+    if (data && d->dev->init_pipeline_cache(data, n)) {
+        d->pc_size = n;
+        printf("n64: Vulkan RDP: pipeline cache loaded (%zu KB) from %s\n", n >> 10, path);
+    } else {
+        if (!data && !strcmp(why, "none"))
+            printf("n64: Vulkan RDP: no pipeline cache yet (%s)\n", path);
+        else
+            fprintf(stderr, "n64: Vulkan RDP: pipeline cache %s ignored (%s), starting empty\n", path,
+                    data ? "the driver refused it" : why);
+        if (!d->dev->init_pipeline_cache(nullptr, 0)) {
+            fprintf(stderr, "n64: Vulkan RDP: the driver cannot make a pipeline cache\n");
+            path[0] = 0;
+        }
+    }
+    free(data);
+    fflush(stdout);
+    d->pc_path = path;
+}
+
+/* Writes the cache when it differs in size from what the file holds (new pipelines). g_pc_mu held. */
+void pc_save_locked(VkRdp *d, const char *why)
+{
+    if (d->pc_path.empty() || !d->dev)
+        return;
+    const size_t n = d->dev->get_pipeline_cache_size();
+    if (n == d->pc_size || n == 0)
+        return;
+    if (n <= PC_EMPTY) {
+        if (!d->pc_no_data_logged)
+            fprintf(stderr, "n64: Vulkan RDP: the driver gives no pipeline cache data (%zu bytes); only its own "
+                            "shader cache (MESA_SHADER_CACHE_DIR) is kept\n", n);
+        d->pc_no_data_logged = true;
+        return;
+    }
+    std::vector<uint8_t> buf(n);
+    if (!d->dev->get_pipeline_cache_data(buf.data(), n))
+        return; /* it grew between the two calls (VK_INCOMPLETE): the next save */
+    const uint64_t t0 = host_ns();
+    const int rc = n64_vk_cache_save(d->pc_path.c_str(), d->dev->get_gpu_properties().pipelineCacheUUID, buf.data(), n);
+    d->pc_size = n; /* a write that failed (logged) is not tried again until the cache grows again */
+    if (rc == 0) {
+        printf("n64: Vulkan RDP: pipeline cache saved (%zu KB, %s, %.1f ms) to %s\n", n >> 10, why,
+               (double)(host_ns() - t0) / 1e6, d->pc_path.c_str());
+        fflush(stdout);
+    }
+}
+
+/* The saver thread: the compiles of the game (a new 4x effect, a new combiner) are on disk within 10 s. */
+void pc_saver(VkRdp *d)
+{
+    std::unique_lock<std::mutex> lk(g_pc_mu);
+    while (!d->pc_cv.wait_for(lk, std::chrono::seconds(10), [d]() { return d->pc_quit; }))
+        pc_save_locked(d, "new pipelines");
+}
+
+void pc_start(VkRdp *d)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_pc_mu);
+        g_pc_live = d;
+        d->pc_quit = false;
+    }
+    if (d->pc_path.empty())
+        return;
+    try {
+        d->pc_thread = std::thread(pc_saver, d);
+    } catch (...) {
+        fprintf(stderr, "n64: Vulkan RDP: no pipeline cache thread; saved at pause and at exit only\n");
+    }
+}
+
+/* Before the device goes: no more saves from elsewhere, the last one here. */
+void pc_stop(VkRdp *d)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_pc_mu);
+        if (g_pc_live == d)
+            g_pc_live = nullptr;
+        d->pc_quit = true;
+    }
+    d->pc_cv.notify_all();
+    if (d->pc_thread.joinable())
+        d->pc_thread.join();
+    std::lock_guard<std::mutex> lk(g_pc_mu);
+    pc_save_locked(d, "exit");
+}
+
+/* paraLLEl-RDP's threads (RDP::set_thread_hook) call the hook the runtime gave n64_rdp_set_thread_hook. */
+void hook_threads()
+{
+    n64_rdp_thread_hook fn = nullptr;
+    void *user = nullptr;
+    n64_rdp_get_thread_hook(&fn, &user);
+    RDP::set_thread_hook(fn, user);
+}
+
 /* ---- n64_rdp_ops ---------------------------------------------------------------------------------------------------- */
 void vk_reset(void *p);
 
@@ -548,6 +780,7 @@ bool try_driver(VkRdp *d, bool *custom)
     }
     d->dev.reset(new Vulkan::Device);
     d->dev->set_context(*d->ctx);
+    pc_load(d); /* before the first command processor: the check's pipelines come from the file too */
     const char *gpu = d->dev->get_gpu_properties().deviceName;
     char drv[2 * VK_MAX_DRIVER_NAME_SIZE + 64];
     if (*custom && d->dev->get_device_features().driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY_KHR) {
@@ -608,6 +841,8 @@ bool try_driver(VkRdp *d, bool *custom)
                              ? ", super-sampled readback" : "");
             printf("n64: Vulkan RDP on %s (paraLLEl-RDP, %s; %s%s)\n", gpu, tries[i].name, drv, up);
             fflush(stdout);
+            std::lock_guard<std::mutex> lk(g_pc_mu);
+            pc_save_locked(d, "startup check");
             return true;
         }
         if (d->upscale > 1) {
@@ -628,6 +863,7 @@ bool try_driver(VkRdp *d, bool *custom)
     d->cp.reset(); /* the command processor, then the device, then the instance */
     d->dev.reset();
     d->ctx.reset();
+    d->pc_path.clear();
     return false;
 }
 
@@ -643,6 +879,9 @@ void *vk_create(n64_rcp_bus bus)
     if (!d)
         return nullptr;
     d->bus = bus;
+    Vulkan::get_stalled_compiles(d->stalls0, d->stall_ns0); /* the check's compiles count as this RDP's */
+    n64_vk_cache_mesa_env(); /* before any driver opens */
+    hook_threads();          /* before any command processor starts its threads */
 
     if (void *gipa = n64_vk_driver_open()) {
         bool custom = true;
@@ -653,6 +892,7 @@ void *vk_create(n64_rcp_bus bus)
                 n64_vk_driver_done(ok ? "ok" : "unsupported");
             if (ok) {
                 vk_reset(d.get());
+                pc_start(d.get());
                 return d.release();
             }
         } else {
@@ -677,6 +917,7 @@ void *vk_create(n64_rcp_bus bus)
     if (!try_driver(d.get(), &custom))
         return nullptr;
     vk_reset(d.get());
+    pc_start(d.get());
     return d.release();
 }
 
@@ -688,6 +929,9 @@ void vk_destroy(void *p)
     on_thread();
     if (d->cp)
         d->cp->idle();
+    pc_stop(d); /* the compiles are over: the last save */
+    d->pf[0] = RDP::VIScanoutBuffer(); /* Vulkan objects: before their device */
+    d->pf[1] = RDP::VIScanoutBuffer();
     d->cp.reset(); /* the command processor, then the device, then the instance */
     d->dev.reset();
     d->ctx.reset();
@@ -698,6 +942,8 @@ void vk_reset(void *p)
 {
     VkRdp *d = static_cast<VkRdp *>(p);
     sync(d);
+    d->dp_owed = d->dp_after = false; /* the machine's reset dropped its deadline */
+    d->pf_valid = false;
     d->start = d->end = d->current = 0;
     d->status = 0;
     d->clock = d->bufbusy = d->pipebusy = d->tmemc = 0;
@@ -817,24 +1063,125 @@ int vk_scanout_scale(void *p)
     return d->upscale > 1 ? d->upscale >> d->down_steps : 0;
 }
 
-/* n64_display's picture at the upscaled size (n64_rdp.h n64_rdp_scanout): everything queued is drawn first. */
-int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+/* The prefetched scanout is of these registers and field, and nothing was drawn where it reads since. */
+bool pf_matches(const VkRdp *d, const uint32_t *vi, uint32_t field)
+{
+    if (!d->pf_valid || d->pf_dirty || field != d->pf_field)
+        return false;
+    for (int r = 0; r < 14; r++)
+        if (r != 4 && vi[r] != d->pf_vi[r]) /* V_CURRENT: the field stands for it */
+            return false;
+    return true;
+}
+
+/* n64_rdp.h n64_rdp_scanout_prefetch: the scanout started now, waited for at n64_display. Only when nothing is queued
+ * since the last wait: then nothing is in front of it on the GPU and the command ring is empty. */
+void vk_scanout_prefetch(void *p, const uint32_t *vi, uint32_t field, uint32_t lo, uint32_t hi)
+{
+    VkRdp *d = static_cast<VkRdp *>(p);
+    d->pf_valid = false;
+    if (d->upscale <= 1 || d->failed || d->unsynced || d->dp_gpu)
+        return;
+    on_thread();
+    for (unsigned r = 0; r < unsigned(RDP::VIRegister::Count); r++)
+        d->cp->set_vi_register(RDP::VIRegister(r), r == unsigned(RDP::VIRegister::VCurrentLine) ? field : vi[r]);
+    RDP::ScanoutOptions so;
+    so.downscale_steps = d->down_steps;
+    d->pf_cur ^= 1;
+    d->cp->scanout_async_buffer(d->pf[d->pf_cur], so);
+    if (!d->pf[d->pf_cur].fence)
+        return; /* it shows nothing: the scanout at n64_display says so */
+    memcpy(d->pf_vi, vi, sizeof d->pf_vi);
+    d->pf_field = field;
+    d->pf_lo = lo;
+    d->pf_hi = hi;
+    d->pf_dirty = false;
+    d->pf_valid = true;
+    d->stats.prefetches++;
+}
+
+void vk_scanout_forget(void *p) { static_cast<VkRdp *>(p)->pf_valid = false; }
+
+/* The prefetched picture, waited for (a GPU wait, counted as a scanout's). */
+const RDP::RGBA *pf_take(VkRdp *d, unsigned *sw, unsigned *sh)
+{
+    RDP::VIScanoutBuffer &b = d->pf[d->pf_cur];
+    const uint64_t t0 = host_ns();
+    b.fence->wait();
+    const uint64_t dt = host_ns() - t0;
+    d->stats.waits++;
+    d->stats.wait_ns += dt;
+    d->stats.scanouts++;
+    d->stats.scanout_ns += dt;
+    d->stats.prefetch_hits++;
+    d->pf_valid = false;
+    *sw = b.width;
+    *sh = b.height;
+    return static_cast<const RDP::RGBA *>(d->dev->map_host_buffer(*b.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+}
+
+/* n64_rdp.h n64_rdp_scanout_rgba: the picture in one of the two kept buffers, read where the GPU copied it (mapped,
+ * no copy): the prefetched one when it is of this picture (n64_rdp_scanout_prefetch), else a scanout now, after
+ * everything queued is drawn. */
+int vk_scanout_rgba(void *p, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h, int *pitch)
 {
     VkRdp *d = static_cast<VkRdp *>(p);
     if (d->upscale <= 1 || d->failed)
         return -1;
     on_thread();
-    sync(d);
     unsigned sw = 0, sh = 0;
-    scanout_rgb(d, vi, field, &sw, &sh);
-    d->cp->begin_frame_context(); /* the scanout waited: nothing of this frame is in flight */
-    if (!sw || !sh || sw > (unsigned)max_w || sh > (unsigned)max_h)
+    const RDP::RGBA *src;
+    if (pf_matches(d, vi, field)) {
+        src = pf_take(d, &sw, &sh);
+    } else {
+        d->pf_valid = false;
+        sync(d);
+        for (unsigned r = 0; r < unsigned(RDP::VIRegister::Count); r++)
+            d->cp->set_vi_register(RDP::VIRegister(r), r == unsigned(RDP::VIRegister::VCurrentLine) ? field : vi[r]);
+        RDP::ScanoutOptions so;
+        so.downscale_steps = d->down_steps;
+        const uint64_t t0 = host_ns();
+        d->pf_cur ^= 1; /* the other buffer: the last picture handed out stays readable */
+        RDP::VIScanoutBuffer &b = d->pf[d->pf_cur];
+        d->cp->scanout_async_buffer(b, so);
+        if (b.fence)
+            b.fence->wait();
+        const uint64_t dt = host_ns() - t0;
+        d->stats.waits++;
+        d->stats.wait_ns += dt;
+        d->stats.scanouts++;
+        d->stats.scanout_ns += dt;
+        d->cp->begin_frame_context(); /* the scanout waited: nothing of this frame is in flight */
+        if (!b.fence || !b.width || !b.height)
+            return -1;
+        sw = b.width;
+        sh = b.height;
+        src = static_cast<const RDP::RGBA *>(d->dev->map_host_buffer(*b.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+    }
+    if (!src || !sw || !sh)
         return -1;
-    const RDP::RGBA *src = d->scan.data();
-    for (size_t i = 0, n = (size_t)sw * sh; i < n; i++)
-        xrgb[i] = (uint32_t)src[i].r << 16 | (uint32_t)src[i].g << 8 | src[i].b;
+    *rgba = reinterpret_cast<const uint8_t *>(src); /* RDP::RGBA: r, g, b, a bytes */
     *w = (int)sw;
     *h = (int)sh;
+    *pitch = (int)sw * 4;
+    return 0;
+}
+
+/* n64_display's picture at the upscaled size (n64_rdp.h n64_rdp_scanout) as 0x00RRGGBB: vk_scanout_rgba converted. */
+int vk_scanout(void *p, const uint32_t *vi, uint32_t field, uint32_t *xrgb, int max_w, int max_h, int *w, int *h)
+{
+    const uint8_t *src = nullptr;
+    int sw = 0, sh = 0, pitch = 0;
+    if (vk_scanout_rgba(p, vi, field, &src, &sw, &sh, &pitch) != 0 || sw > max_w || sh > max_h)
+        return -1;
+    for (int y = 0; y < sh; y++) {
+        const uint8_t *s = src + (size_t)y * (size_t)pitch;
+        uint32_t *o = xrgb + (size_t)y * (size_t)sw;
+        for (int x = 0; x < sw; x++)
+            o[x] = (uint32_t)s[4 * x] << 16 | (uint32_t)s[4 * x + 1] << 8 | s[4 * x + 2];
+    }
+    *w = sw;
+    *h = sh;
     return 0;
 }
 
@@ -859,7 +1206,7 @@ void vk_state_save(void *p, n64_rdp_common_state *c, uint8_t *extra)
 {
     VkRdp *d = static_cast<VkRdp *>(p);
     on_thread();
-    sync(d);
+    sync(d); /* (a deferred DP interrupt: the core completes it before a save, n64_state_save) */
     memset(c, 0, sizeof *c);
     c->start = d->start;
     c->end = d->end;
@@ -900,6 +1247,8 @@ int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, 
         return -1;
     on_thread();
     sync(d);
+    d->dp_owed = d->dp_after = false; /* the machine's events are the state's (none pending) */
+    d->pf_valid = false;
     d->start = c->start;
     d->end = c->end;
     d->current = c->current;
@@ -955,13 +1304,45 @@ int vk_state_load(void *p, const n64_rdp_common_state *c, const uint8_t *extra, 
 
 void vk_stats(void *p, n64_rdp_stats *out)
 {
-    *out = static_cast<VkRdp *>(p)->stats;
+    const VkRdp *d = static_cast<VkRdp *>(p);
+    *out = d->stats;
+    if (d->cp)
+        d->cp->get_ring_blocked(out->queue_waits, out->queue_ns);
+    uint64_t n = 0, ns = 0;
+    Vulkan::get_stalled_compiles(n, ns);
+    out->stalled_compiles = n - d->stalls0;
+    out->stalled_compile_ns = ns - d->stall_ns0;
 }
 
+/* n64_rdp_unreported: the rows queued since the last wait (wrote_add's ranges, reported at the next sync) against
+ * RDRAM [lo, hi). */
+int vk_unreported(void *p, uint32_t lo, uint32_t hi)
+{
+    const VkRdp *d = static_cast<VkRdp *>(p);
+    for (int i = 0; i < 2; i++) {
+        if (d->wr_hi[i] > d->wr_lo[i] && d->wr_lo[i] < hi && lo < d->wr_hi[i])
+            return 1;
+        if (d->dp_wr_hi[i] > d->dp_wr_lo[i] && d->dp_wr_lo[i] < hi && lo < d->dp_wr_hi[i])
+            return 1;
+    }
+    return 0;
+}
+
+/* n64_rdp.h n64_rdp_dp_complete. */
+void vk_dp_complete(void *p) { dp_finish(static_cast<VkRdp *>(p)); }
+
 } // namespace
+
+extern "C" void n64_rdp_vk_save_caches(const char *why)
+{
+    std::lock_guard<std::mutex> lk(g_pc_mu);
+    if (g_pc_live)
+        pc_save_locked(g_pc_live, why);
+}
 
 extern "C" const n64_rdp_ops n64_rdp_vk_ops = { "vulkan", vk_create, vk_destroy, vk_reset, vk_attach_dmem,
                                                 vk_read_reg, vk_write_reg, vk_run, vk_set_threads, vk_flush,
                                                 vk_failed, vk_upscale, vk_scanout_scale, vk_scanout,
                                                 vk_state_extra_size, vk_state_save, vk_state_load,
-                                                vk_stats };
+                                                vk_stats, vk_unreported, vk_dp_complete, vk_scanout_prefetch,
+                                                vk_scanout_forget, vk_scanout_rgba };

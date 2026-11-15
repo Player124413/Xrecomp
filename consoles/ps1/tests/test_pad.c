@@ -185,6 +185,46 @@ static void test_digital_pad(void)
     ps1_destroy(m);
 }
 
+/* JOY_STAT bit 7 is the /ACK level: a pulse of PS1_SIO_ACK_PULSE cycles from the IRQ, not a latch (code that waits for
+ * it to drop with interrupts off, like Duke Nukem - Time to Kill's libcard, hangs on a latch); bit 9 stays until
+ * JOY_CTRL bit 4. One byte sent, then cycles in small steps until IRQ 7 arrives. */
+static void ack_pulse(ps1_machine *m, const char *what, uint8_t tx)
+{
+    m->i_stat &= ~(1u << PS1_IRQ_SIO0);
+    ps1_io_write(m, 0x1F801040u, tx, 1);
+    int n = 0;
+    while (!(m->i_stat & (1u << PS1_IRQ_SIO0)) && n++ < 1000)
+        ps1_run_cycles(m, 4);
+    CHECK(m->i_stat & (1u << PS1_IRQ_SIO0), "%s: no IRQ 7", what);
+    uint32_t st = ps1_io_read(m, 0x1F801044u, 4);
+    CHECK(st & 0x80, "%s: JOY_STAT %03X at the IRQ, want bit 7 (/ACK low)", what, st);
+    CHECK(st & 0x200, "%s: JOY_STAT %03X at the IRQ, want bit 9", what, st);
+    ps1_run_cycles(m, PS1_SIO_ACK_PULSE + 8);
+    st = ps1_io_read(m, 0x1F801044u, 4);
+    CHECK(!(st & 0x80), "%s: JOY_STAT %03X after the pulse, want bit 7 clear", what, st);
+    CHECK(st & 0x200, "%s: JOY_STAT %03X after the pulse, want bit 9 until acknowledged", what, st);
+    ps1_io_write(m, 0x1F80104Au, ps1_io_read(m, 0x1F80104Au, 2) | 0x10, 2);
+    st = ps1_io_read(m, 0x1F801044u, 4);
+    CHECK(!(st & 0x200), "%s: JOY_STAT %03X after JOY_CTRL bit 4, want bit 9 clear", what, st);
+    (void)ps1_io_read(m, 0x1F801040u, 1);
+    m->i_stat &= ~(1u << PS1_IRQ_SIO0);
+}
+
+static void test_ack_pulse(void)
+{
+    ps1_machine *m = machine();
+    ps1_set_pad(m, 0, PS1_PAD_DIGITAL, 0, 0x80, 0x80, 0x80, 0x80);
+    ps1_io_write(m, 0x1F80104Au, 0x1003, 2); /* TX enable, /JOY1, ACK IRQ */
+    ack_pulse(m, "pad 01h", 0x01);
+    ack_pulse(m, "pad 42h", 0x42);
+    ps1_io_write(m, 0x1F80104Au, 0, 2);
+    ps1_io_write(m, 0x1F80104Au, 0x1003, 2); /* the memory card in slot 1 */
+    ack_pulse(m, "card 81h", 0x81);
+    ack_pulse(m, "card 'R'", 'R');
+    ps1_io_write(m, 0x1F80104Au, 0, 2);
+    ps1_destroy(m);
+}
+
 int main(void)
 {
     g_bios = calloc(1, PS1_BIOS_SIZE);
@@ -196,6 +236,7 @@ int main(void)
     g_bios[3] = 0x10;
     test_dualshock();
     test_digital_pad();
+    test_ack_pulse();
     free(g_bios);
     if (failures) {
         printf("%d failure(s)\n", failures);

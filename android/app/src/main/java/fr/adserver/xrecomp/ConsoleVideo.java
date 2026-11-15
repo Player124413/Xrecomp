@@ -227,4 +227,111 @@ final class ConsoleVideo {
         int i = s.indexOf(choice);
         return i < 0 ? R.string.MENU_VIDEO_FOLLOW : s.labels[i];
     }
+
+    // ---- Live picture (the in-game menu) ----------------------------------------------------------------------------
+
+    /**
+     * The keys a running game takes at once (MenuNative.nativeSetPicture, src/video/host_window.c
+     * host_window_request_picture and fb_present_sdl.c xbox_FramebufferWindowSetShader): the console window's scale
+     * and filter, and the picture shader with its strength, curvature and ghosting. Every other key waits for the game
+     * to start again.
+     */
+    static final String[] LIVE_KEYS = { ENV_SCALE, ENV_FILTER, ENV_SHADER, ENV_SHADER_STRENGTH, ENV_SHADER_CURVATURE,
+                                        ENV_SHADER_GHOSTING };
+
+    static boolean isLive(String key) {
+        for (String k : LIVE_KEYS)
+            if (k.equals(key))
+                return true;
+        return false;
+    }
+
+    /** True when every key of option o is taken live ({@link #LIVE_KEYS}). */
+    static boolean isLive(RecompConfig.Option o) {
+        for (String k : o.keys)
+            if (!isLive(k))
+                return false;
+        return true;
+    }
+
+    /** What the running game's picture is: every value resolved (the game's, else Settings', else the default). */
+    static final class Picture {
+        /** Scale and filter: null for an Xbox game (its presenter has neither). Shader: a preset name, « none ». */
+        final String scale, filter, shader;
+        /** Strength -1 (the preset's own), curvature and ghosting 0..100. */
+        final int strength, curvature, ghosting;
+        final boolean xbox;
+
+        Picture(boolean xbox, String scale, String filter, String shader, int strength, int curvature, int ghosting) {
+            this.xbox = xbox;
+            this.scale = scale;
+            this.filter = filter;
+            this.shader = shader;
+            this.strength = strength;
+            this.curvature = curvature;
+            this.ghosting = ghosting;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof Picture))
+                return false;
+            Picture p = (Picture)o;
+            return xbox == p.xbox && java.util.Objects.equals(scale, p.scale)
+                   && java.util.Objects.equals(filter, p.filter) && shader.equals(p.shader)
+                   && strength == p.strength && curvature == p.curvature && ghosting == p.ghosting;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Objects.hash(xbox, scale, filter, shader, strength, curvature, ghosting);
+        }
+
+        @Override
+        public String toString() {
+            return (xbox ? "" : "scale " + scale + ", filter " + filter + ", ") + "shader " + shader + " (strength "
+                   + strength + ", curvature " + curvature + ", ghosting " + ghosting + ")";
+        }
+    }
+
+    /**
+     * The picture a game of console con plays with, from Settings (global, may be null) and its own settings (game,
+     * may be null), as ShellActivity's environment and the runtime's defaults would make it: scale aspect, filter the
+     * console's own (GBA nearest, the others linear), shader none, strength the preset's own (-1).
+     */
+    static Picture livePicture(Console con, RecompConfig global, RecompConfig game) {
+        boolean xbox = con == null || con == Console.XBOX;
+        String scale = null, filter = null;
+        if (!xbox) {
+            scale = known(Setting.SCALE, GameSettings.effective(global, game, ENV_SCALE), SCALE_ASPECT);
+            filter = known(Setting.FILTER, GameSettings.effective(global, game, ENV_FILTER),
+                           con == Console.GBA ? FILTER_NEAREST : FILTER_LINEAR);
+        }
+        String sh = GameSettings.effective(global, game, ENV_SHADER);
+        sh = sh == null ? "none" : sh.trim().toLowerCase(Locale.ROOT);
+        if (!sh.equals(SHADER_SHARP) && !sh.equals(SHADER_SCANLINES) && !sh.equals(SHADER_CRT)
+            && !sh.equals(SHADER_LCD))
+            sh = "none";
+        return new Picture(xbox, scale, filter, sh,
+                           percent(GameSettings.effective(global, game, ENV_SHADER_STRENGTH), -1),
+                           percent(GameSettings.effective(global, game, ENV_SHADER_CURVATURE), 0),
+                           xbox ? 0 : percent(GameSettings.effective(global, game, ENV_SHADER_GHOSTING), 0));
+    }
+
+    private static String known(Setting s, String v, String def) {
+        int i = s.indexOf(v);
+        return i < 0 ? def : s.values[i];
+    }
+
+    /** present_shaders.c env_percent: a number, clamped to 0..100; def when unset or not a number. */
+    private static int percent(String v, int def) {
+        if (v == null)
+            return def;
+        try {
+            long n = Long.parseLong(v.trim());
+            return (int)Math.max(0, Math.min(100, n));
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
 }

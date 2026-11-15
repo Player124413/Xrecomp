@@ -157,9 +157,11 @@ int n64_rc_cache(n64_machine *m, int op, uint64_t va) __attribute__((weak));
 
 #ifdef N64_RC_COUNT
 #define RC_COUNT() (h->rc_native++)
+#define RC_COUNT_N(N) (h->rc_native += (N))
 #define RC_UNCOUNT() (h->rc_native--)
 #else
 #define RC_COUNT() ((void)0)
+#define RC_COUNT_N(N) ((void)(N))
 #define RC_UNCOUNT() ((void)0)
 #endif
 
@@ -193,6 +195,20 @@ int n64_rc_cache(n64_machine *m, int op, uint64_t va) __attribute__((weak));
             epc = RC_SX(A);                                                                                          \
             ehint = (N);                                                                                             \
             goto x_seg;                                                                                              \
+        }                                                                                                            \
+    } while (0)
+
+/* An idle loop (a branch to itself over a NOP, n64_tools lift.py idle_loop), just taken: nothing but the clock and the
+ * count move while it spins, so the turns that would all pass its segment check (RC_SEG(A, TICKS, 2) in front of it,
+ * two instructions a turn) run at once; the next check then leaves where the spinning would have (the interpreter's
+ * blocks fast-forward the same loop, n64_cpu.c). */
+#define RC_IDLE(TICKS)                                                                                               \
+    do {                                                                                                             \
+        if (now + (TICKS) < stop) {                                                                                  \
+            uint64_t turns_ = (stop - 1 - (TICKS) - now) / (2 * RC_CPI);                                             \
+            now += turns_ * 2 * RC_CPI;                                                                              \
+            ic += turns_ * 2;                                                                                        \
+            RC_COUNT_N(turns_ * 2);                                                                                  \
         }                                                                                                            \
     } while (0)
 

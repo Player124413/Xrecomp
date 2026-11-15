@@ -65,7 +65,8 @@ if(NOT TARGET n64_rdp AND TARGET n64_rdp_sw)
         add_subdirectory(${N64_PRDP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/parallel-rdp)
         # n64_vk_driver.c: a driver the player supplied (Turnip...) through libxba_vkdriver.so, dlopened only when
         # RECOMP_VK_DRIVER_DIR selects one (n64_vk_driver.h); off Android that library is absent and the open fails.
-        add_library(n64_rdp_vk STATIC n64_rdp_vk.cpp n64_vk_driver.c)
+        # n64_vk_cache.c: the pipeline cache file under RECOMP_VK_CACHE_DIR (n64_vk_cache.h).
+        add_library(n64_rdp_vk STATIC n64_rdp_vk.cpp n64_vk_driver.c n64_vk_cache.c)
         target_include_directories(n64_rdp_vk PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_definitions(n64_rdp_vk PUBLIC N64_RDP_HAVE_VULKAN)
         target_compile_options(n64_rdp_vk PRIVATE -Wall -Wextra)

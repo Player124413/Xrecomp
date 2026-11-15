@@ -8,7 +8,8 @@
  * Not state: the ROM (identified by its hash), the machine's options, the RDRAM page write counters of the recompiled
  * code (every page is bumped on load, so each lifted function is checked against RDRAM again before it runs), the
  * attached table's dispatch cache, the VI's picture path (n64_vi.c: canvas and line buffers, rebuilt from the next
- * picture), host pointers (devices, buffers, the tty sink), the RTC's test clock. */
+ * picture), host pointers (devices, buffers, the tty sink), the RTC's test clock. A deferred DP interrupt (EV_DP,
+ * n64_core.c) is completed before a save, so a state never holds one. */
 #include "n64_internal.h"
 #include "n64_rdp.h"
 
@@ -169,7 +170,8 @@ size_t n64_state_save(n64_machine *m, uint8_t *out, size_t cap)
 {
     if (!m || !out)
         return 0;
-    n64_rdp_flush(m->rdp); /* everything drawn is in RDRAM */
+    n64_dp_complete_now(m); /* a deferred DP interrupt comes now: a state never holds one (n64_core.c) */
+    n64_rdp_flush(m->rdp);  /* everything drawn is in RDRAM */
     size_t need = n64_state_size(m);
     if (cap < need)
         return 0;
@@ -324,6 +326,7 @@ int n64_state_load(n64_machine *m, const uint8_t *data, size_t size)
     for (uint32_t p = 0; p < (m->rdram_size >> N64_PAGE_SHIFT); p++)
         m->rdram_gen[p]++; /* new contents everywhere, as far as lifted code is concerned */
     n64_vi_free(m); /* the picture path starts afresh at the next picture */
+    n64_dp_state_loaded(m); /* the deferred DP interrupt's policy too (the RDP's load dropped any pending one) */
     n64_recomp_state_loaded(m, (int32_t)get32(at[SEC_RC]));
     return N64_STATE_OK;
 }

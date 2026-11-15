@@ -158,7 +158,10 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 #ifdef PARALLEL_RDP_SHADER_DIR
 				Granite::Global::create_thread_context(),
 #endif
-				this, 4 * 1024);
+				// xboxrecomp-android patch: 1 MB of commands instead of 16 KB (~100 triangles), so the emulation
+				// thread does not wait for the GPU while a frame's display list is queued (the N64 runtime's
+				// deferred DP interrupt waits once, later: consoles/n64/runtime/n64_core.c).
+				this, 1u << 18);
 	}
 
 	if (const char *env = getenv("PARALLEL_RDP_BENCH"))
@@ -248,6 +251,12 @@ bool CommandProcessor::uses_subgroups() const
 bool CommandProcessor::uses_ubershader() const
 {
 	return renderer.uses_ubershader();
+}
+
+void CommandProcessor::get_ring_blocked(uint64_t &waits, uint64_t &ns) const
+{
+	waits = ring.blocked_waits;
+	ns = ring.blocked_ns;
 }
 
 void CommandProcessor::set_validation_interface(ValidationInterface *iface)

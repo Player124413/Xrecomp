@@ -2,7 +2,8 @@
  *
  * The PS1 runtime's shape (consoles/ps1/runtime/ps1_runtime.c): one thread does everything, frame by frame: pump the
  * window's events (quit, background, pads), read the pads, run one N64 frame (to the next VI interrupt), queue its
- * audio, present the VI's picture, then sleep to the next frame's deadline. The frame's length comes from the CPU
+ * audio, present the VI's picture (made, converted and uploaded only when it changed: n64_display_changed; the same
+ * texture drawn again otherwise, RECOMP_N64_PRESENT_ALWAYS=1 makes one every VI), then sleep to the next frame's deadline. The frame's length comes from the CPU
  * cycles the core ran (its VI follows the game's timing: NTSC 60 Hz, PAL 50 Hz, one field per interrupt when
  * interlaced), so pacing is the N64's own VI rate; absolute deadlines (no drift), nudged by the audio queue once the
  * AI makes sound, a stall of more than three frames resets the clock. While the app is paused (background, the
@@ -333,6 +334,15 @@ int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int au
     return skip;
 }
 
+int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run)
+{
+    if (mode >= 0)
+        return n64_runtime_frameskip(mode, behind_ns, frame_ns, audio_low, run);
+    int skip = *run < 1 && (behind_ns > (int64_t)(frame_ns / 2) || audio_low);
+    *run = skip ? *run + 1 : 0;
+    return skip;
+}
+
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
 {
     double fps = p->seconds > 0 ? (double)p->frames / p->seconds : 0.0;
@@ -353,16 +363,38 @@ int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n)
     if (p->rdp && !strcmp(p->rdp, "software"))
         snprintf(threads, sizeof threads, ", %d thread%s", p->rdp_threads, p->rdp_threads == 1 ? "" : "s");
     return snprintf(out, n,
-                    "speed %.0f %% (%.1f of %.1f VI/s); cpu %.1f rsp %.1f rdp %.1f (wait %.1f) sched %.1f vi %.1f "
+                    "speed %.0f %% (%.1f of %.1f VI/s); cpu %.1f rsp %.1f rdp %.1f (queue %.1f, sync %.1f, scanout "
+                    "%.1f) sched %.1f vi %.1f "
                     "present %.1f audio %.1f idle %.1f other %.1f ms/frame; worst %.0f ms, %llu > %.1f ms, %llu > "
                     "%.1f ms of %llu frames; rsp %.2f M instr, rdp %.0f cmds, %.1f full syncs /frame; %s; rdp %s%s, "
                     "upscale %dx, rewind %s; %s",
                     p->vi_hz > 0 ? 100.0 * fps / p->vi_hz : 0.0, fps, p->vi_hz, p->cpu_ms, p->rsp_ms, p->rdp_ms,
-                    p->rdp_wait_ms, p->sched_ms, p->vi_ms, p->present_ms, p->audio_ms, p->idle_ms, p->other_ms,
+                    p->rdp_queue_ms, p->rdp_sync_ms, p->rdp_scanout_ms, p->sched_ms, p->vi_ms, p->present_ms, p->audio_ms, p->idle_ms, p->other_ms,
                     p->worst_ms, (unsigned long long)p->over_1, p->over_ms, (unsigned long long)p->over_2,
                     2 * p->over_ms, (unsigned long long)p->host_frames, p->rsp_instr / 1e6, p->rdp_cmds,
                     p->rdp_syncs, pack, p->rdp ? p->rdp : "none", threads, p->upscale > 0 ? p->upscale : 1,
                     p->rewind ? "on" : "off", core);
+}
+
+int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t n)
+{
+    return snprintf(out, n,
+                    "%llu VIs, %llu pictures (%.1f/s), %llu unchanged, %llu skipped; %llu VI_ORIGIN changes, %llu "
+                    "scanouts (%llu early), %llu full rings; DP %llu deferred (%llu early, %llu backoffs), %llu at "
+                    "once, %llu waited %.1f ms (%.2f ms each); %llu stalled compiles (%.0f ms); worst %.0f ms: core "
+                    "%.1f vi %.1f present %.1f audio %.1f other %.1f (rdp queue %.1f, sync %.1f, deadline %.1f, "
+                    "scanout %.1f)",
+                    (unsigned long long)p->frames, (unsigned long long)p->pictures,
+                    p->seconds > 0 ? (double)p->pictures / p->seconds : 0.0, (unsigned long long)p->unchanged,
+                    (unsigned long long)p->skipped, (unsigned long long)p->vi_origin_changes,
+                    (unsigned long long)p->scanouts, (unsigned long long)p->scanouts_early,
+                    (unsigned long long)p->queue_waits, (unsigned long long)p->dp_deferred,
+                    (unsigned long long)p->dp_early, (unsigned long long)p->dp_backoffs,
+                    (unsigned long long)p->dp_now, (unsigned long long)p->dp_waits, p->dp_wait_ms,
+                    p->dp_deferred ? p->dp_wait_ms / (double)p->dp_deferred : 0.0,
+                    (unsigned long long)p->stalled_compiles, p->stalled_compile_ms, p->worst_ms, p->worst_core_ms,
+                    p->worst_vi_ms, p->worst_present_ms, p->worst_audio_ms, p->worst_other_ms, p->worst_queue_ms,
+                    p->worst_sync_ms, p->worst_deadline_ms, p->worst_scanout_ms);
 }
 
 /* ---- Files ---------------------------------------------------------------------------------------------------- */
@@ -479,6 +511,32 @@ static int write_ppm(const char *path, const uint32_t *px, int w, int h)
 /* The run's machine and its saves, shared with the exit hook (the in-game menu's Quit ends the process from the UI
  * thread) and the lifecycle listener: s_mu is held while a frame runs and while a save is written. */
 static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* The upscaled picture presented last straight from the Vulkan RDP's buffer (n64_display_rgba,
+ * host_window_present_rgba_shared): host_window_screenshot_bmp copies it on demand (any thread) instead of the window
+ * copying every picture. Under s_mu (the RDP's buffers change only while it is held). */
+static struct {
+    const uint8_t *px;
+    int w, h, pitch;
+} s_shared;
+
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    int rc = -1;
+    pthread_mutex_lock(&s_mu);
+    if (s_shared.px && s_shared.w > 0 && s_shared.h > 0 &&
+        (*px = malloc((size_t)s_shared.w * (size_t)s_shared.h * 4)) != NULL) {
+        for (int y = 0; y < s_shared.h; y++)
+            memcpy(*px + (size_t)y * (size_t)s_shared.w * 4, s_shared.px + (size_t)y * (size_t)s_shared.pitch,
+                   (size_t)s_shared.w * 4);
+        *w = s_shared.w;
+        *h = s_shared.h;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&s_mu);
+    return rc;
+}
 static n64_machine *s_m;
 static char s_save_dir[1024], s_key[64];
 static uint8_t *s_saved[N_SAVES]; /* each image as last read or written (or as the run started), by kind */
@@ -529,15 +587,35 @@ static void saves_flush(const char *why)
     pthread_mutex_unlock(&s_mu);
 }
 
-static void on_exit_hook(const char *why)
+/* The discovery loop's record to disk (XBA-174): at exit, when the app pauses (a session usually ends killed in the
+ * background, after the pause) and every few minutes of play. Appends only what the file lacks. */
+#define MISSED_EVERY_NS (180ull * 1000000000ull)
+static void missed_flush(void)
 {
-    (void)why;
-    saves_flush("exit");
-    /* The in-game menu's Quit ends the process here: the discovery loop's code too (XBA-174). */
     pthread_mutex_lock(&s_mu);
     if (s_m && s_discovered[0])
         n64_pack_save_missed(s_m, s_discovered);
     pthread_mutex_unlock(&s_mu);
+}
+
+/* missed_flush every MISSED_EVERY_NS of the run loop's time (the emulation thread, between frames). */
+static void missed_flush_every(uint64_t now)
+{
+    static uint64_t last;
+    if (!last)
+        last = now;
+    if (now - last >= MISSED_EVERY_NS) {
+        last = now;
+        missed_flush();
+    }
+}
+
+static void on_exit_hook(const char *why)
+{
+    (void)why;
+    saves_flush("exit");
+    n64_rdp_save_caches(); /* the Vulkan RDP's pipeline cache, when new pipelines were compiled */
+    missed_flush(); /* the in-game menu's Quit ends the process here */
 }
 
 /* The app paused (background, the in-game menu): the saves go to disk at once, from the thread that paused it (on
@@ -546,8 +624,11 @@ static void on_exit_hook(const char *why)
 static void on_lifecycle(int paused, void *user)
 {
     (void)user;
-    if (paused)
+    if (paused) {
         saves_flush("pause");
+        n64_rdp_save_caches(); /* the Vulkan RDP's pipeline cache (n64_vk_cache.h): sessions end killed after a pause */
+        missed_flush();
+    }
 }
 
 static void snapshot(n64_machine *m, int kind)
@@ -776,7 +857,13 @@ static uint64_t now_ns(void)
 typedef struct rt_perf_acc {
     uint64_t core, vi, present, audio, idle;
     uint64_t host_frames, over_1, over_2;
+    uint64_t pictures, unchanged, skipped; /* n64_runtime_perf's */
 } rt_perf_acc;
+
+/* The worst host frame's breakdown (ns): its length without the sleep, its stages, the RDP's waits in it. */
+typedef struct rt_worst {
+    uint64_t busy, core, vi, present, audio, queue, wait, scanout, deadline;
+} rt_worst;
 
 /* Everything a line is the difference of: taken at the start, at each line and after a pause. */
 typedef struct rt_perf_mark {
@@ -785,6 +872,7 @@ typedef struct rt_perf_mark {
     n64_perf core;
     n64_recomp_stats rc;
     uint64_t instructions;
+    uint64_t vi_origin_changes;
 } rt_perf_mark;
 
 static n64_runtime_perf s_perf_last;
@@ -802,6 +890,9 @@ static void perf_mark(rt_perf_mark *k, n64_machine *m, const rt_perf_acc *acc, u
     n64_perf_get(m, &k->core);
     n64_recomp_get_stats(m, &k->rc);
     k->instructions = n64_instructions(m);
+    n64_activity a;
+    n64_guest_activity(m, &a);
+    k->vi_origin_changes = a.vi_origin_changes;
 }
 
 /* The host core this thread runs on and its clock, where the system says (Linux, Android). */
@@ -831,7 +922,8 @@ static double ms_per(uint64_t ns, uint64_t frames)
 
 /* The line's figures from mark a to mark b (wall time `wall`). */
 static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_mark *b, uint64_t wall,
-                      uint64_t worst, uint64_t frame_ns, int pack, struct n64_rdp *rdp, int rdp_threads, int rewind)
+                      const rt_worst *worst, uint64_t frame_ns, int pack, struct n64_rdp *rdp, int rdp_threads,
+                      int rewind)
 {
     memset(p, 0, sizeof *p);
     const uint64_t f = b->core.frames - a->core.frames;
@@ -851,6 +943,9 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     if (p->sched_ms < 0)
         p->sched_ms = 0;
     p->rdp_wait_ms = ms_per(b->core.rdp_wait_ns - a->core.rdp_wait_ns, f);
+    p->rdp_queue_ms = ms_per(b->core.rdp_queue_ns - a->core.rdp_queue_ns, f);
+    p->rdp_scanout_ms = ms_per(b->core.rdp_scanout_ns - a->core.rdp_scanout_ns, f);
+    p->rdp_sync_ms = p->rdp_wait_ms > p->rdp_scanout_ms ? p->rdp_wait_ms - p->rdp_scanout_ms : 0.0;
     p->vi_ms = ms_per(b->acc.vi - a->acc.vi, f);
     p->present_ms = ms_per(b->acc.present - a->acc.present, f);
     p->audio_ms = ms_per(b->acc.audio - a->acc.audio, f);
@@ -858,7 +953,34 @@ static void perf_fill(n64_runtime_perf *p, const rt_perf_mark *a, const rt_perf_
     p->other_ms = ms_per(wall, f) - core - p->vi_ms - p->present_ms - p->audio_ms - p->idle_ms;
     if (p->other_ms < 0)
         p->other_ms = 0;
-    p->worst_ms = (double)worst / 1e6;
+    p->worst_ms = (double)worst->busy / 1e6;
+    p->worst_core_ms = (double)worst->core / 1e6;
+    p->worst_vi_ms = (double)worst->vi / 1e6;
+    p->worst_present_ms = (double)worst->present / 1e6;
+    p->worst_audio_ms = (double)worst->audio / 1e6;
+    {
+        uint64_t parts = worst->core + worst->vi + worst->present + worst->audio;
+        p->worst_other_ms = worst->busy > parts ? (double)(worst->busy - parts) / 1e6 : 0.0;
+    }
+    p->worst_queue_ms = (double)worst->queue / 1e6;
+    p->worst_scanout_ms = (double)worst->scanout / 1e6;
+    p->worst_sync_ms = worst->wait > worst->scanout ? (double)(worst->wait - worst->scanout) / 1e6 : 0.0;
+    p->worst_deadline_ms = (double)worst->deadline / 1e6;
+    p->pictures = b->acc.pictures - a->acc.pictures;
+    p->unchanged = b->acc.unchanged - a->acc.unchanged;
+    p->skipped = b->acc.skipped - a->acc.skipped;
+    p->vi_origin_changes = b->vi_origin_changes - a->vi_origin_changes;
+    p->scanouts = b->core.rdp_scanouts - a->core.rdp_scanouts;
+    p->scanouts_early = b->core.rdp_prefetch_hits - a->core.rdp_prefetch_hits;
+    p->dp_deferred = b->core.dp_deferred - a->core.dp_deferred;
+    p->dp_now = b->core.dp_now - a->core.dp_now;
+    p->dp_early = b->core.dp_early - a->core.dp_early;
+    p->dp_backoffs = b->core.dp_backoffs - a->core.dp_backoffs;
+    p->dp_waits = b->core.rdp_dp_waits - a->core.rdp_dp_waits;
+    p->dp_wait_ms = (double)(b->core.rdp_dp_wait_ns - a->core.rdp_dp_wait_ns) / 1e6;
+    p->queue_waits = b->core.rdp_queue_waits - a->core.rdp_queue_waits;
+    p->stalled_compiles = b->core.rdp_stalled_compiles - a->core.rdp_stalled_compiles;
+    p->stalled_compile_ms = (double)(b->core.rdp_stalled_compile_ns - a->core.rdp_stalled_compile_ns) / 1e6;
     p->over_ms = (double)frame_ns / 1e6;
     p->over_1 = b->acc.over_1 - a->acc.over_1;
     p->over_2 = b->acc.over_2 - a->acc.over_2;
@@ -968,8 +1090,7 @@ static void pads_read(int port, int players, int range, int dead, pad_in *out)
         uint32_t pressed = 0, swallow = 0;
         out->hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
         out->hk_pressed |= pressed;
-        if (swallow) /* a held chord's buttons reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
+        console_pad_swallow(&s_pad_map, &o, swallow); /* a held chord's buttons: not the on-screen pad's */
         out->buttons |= n64_runtime_buttons_of(o.buttons);
         int8_t x, y;
         n64_runtime_stick(o.stick_x[0], o.stick_y[0], range, dead, &x, &y);
@@ -1153,10 +1274,16 @@ int n64_runtime_run(const n64_runtime_opts *o)
         fskip = N64_RT_FRAMESKIP_MAX;
     if (fskip < N64_RT_FRAMESKIP_AUTO)
         fskip = N64_RT_FRAMESKIP_AUTO;
+    /* A picture is made, converted and uploaded only when it changed (n64_display_changed); RECOMP_N64_PRESENT_ALWAYS=1:
+     * on every VI, as before. */
+    int present_always = env_choice("RECOMP_N64_PRESENT_ALWAYS", "1", 0);
     if (fskip == N64_RT_FRAMESKIP_AUTO)
-        printf("n64: frame skip auto (when late or the audio runs low, at most 3 in a row)\n");
+        printf("n64: frame skip auto (when late or the audio runs low, at most %s in a row)\n",
+               present_always ? "3" : "1 new picture");
     else
         printf("n64: frame skip %d\n", fskip);
+    printf("n64: present %s\n", present_always ? "every VI (RECOMP_N64_PRESENT_ALWAYS=1)"
+                                                : "new pictures only (unchanged VIs show the last one again)");
     int tty = o->tty >= 0 ? o->tty : env_choice("RECOMP_N64_TTY", "1", 0);
     if (tty)
         n64_set_tty(m, on_tty, NULL);
@@ -1245,6 +1372,10 @@ int n64_runtime_run(const n64_runtime_opts *o)
             fprintf(stderr, "n64: no memory for the %dx picture, shown at 1x\n", sscale);
         }
     }
+    /* The upscaled picture handed to the window straight from the Vulkan RDP's scanout buffer (n64_display_rgba): one
+     * copy (the texture upload) instead of RGBA -> XRGB -> RGBA and the window's copy for screenshots.
+     * RECOMP_N64_PRESENT_DIRECT=0: through the XRGB buffer as before. */
+    const int rgba_direct = window && xrgb_up && xrgb == xrgb_up && !env_choice("RECOMP_N64_PRESENT_DIRECT", "0", 0);
     static int16_t pcm[N64_AUDIO_RATE / 10 * 2];
     int dw = 320, dh = 240, last_w = 0, last_h = 0, display_on = -1, last_kind = N64_SAVE_NONE;
     uint64_t frames = 0, next = now_ns(), t0 = next, late_resets = 0, dirty_at = 0, dirty_first = 0;
@@ -1270,7 +1401,13 @@ int n64_runtime_run(const n64_runtime_opts *o)
     perf_mark(&pm_run, m, &pacc, t0);
     pthread_mutex_unlock(&s_mu);
     pm_line = pm_run;
-    uint64_t p_worst = 0, p_worst_run = 0, p_iter = 0, p_iter_idle = 0, p_paused_at = 0, p_frame_ns = 16683333;
+    uint64_t p_iter = 0, p_iter_idle = 0, p_paused_at = 0, p_frame_ns = 16683333;
+    rt_worst p_worst, p_worst_run; /* the worst host frame of the line, of the run */
+    memset(&p_worst, 0, sizeof p_worst);
+    memset(&p_worst_run, 0, sizeof p_worst_run);
+    rt_perf_acc p_iter_acc = pacc; /* the stages and the RDP's counters at the host frame's start */
+    n64_rdp_stats p_iter_rdp;
+    memset(&p_iter_rdp, 0, sizeof p_iter_rdp);
     recomp_perf_hint_begin(16683333); /* the frame period; each frame's own below */
 
     for (;;) {
@@ -1289,11 +1426,13 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 printf("n64: automatic slot %s\n", recomp_states_error(recomp_states_save(RECOMP_STATE_AUTO)));
             break;
         }
+        missed_flush_every(now_ns());
         if (recomp_lifecycle_paused()) {
             if (!was_paused) {
                 printf("n64: paused at frame %llu\n", (unsigned long long)frames);
                 fflush(stdout);
                 saves_flush("pause");
+                missed_flush();
                 rumble_sent[0] = rumble_sent[1] = rumble_sent[2] = rumble_sent[3] = 1; /* stopped below on resume */
                 for (int p = 0; p < HOST_PAD_PORTS; p++)
                     host_pad_rumble(p, 0, 0, 0);
@@ -1315,23 +1454,35 @@ int n64_runtime_run(const n64_runtime_opts *o)
             pthread_mutex_lock(&s_mu);
             perf_mark(&pm_line, m, &pacc, next);
             pthread_mutex_unlock(&s_mu);
-            p_worst = 0;
+            memset(&p_worst, 0, sizeof p_worst);
             p_iter = 0;
         }
-        { /* the host frame that ended: its length without the sleep */
+        { /* the host frame that ended: its length without the sleep, and for the worst one its own breakdown */
             uint64_t it = now_ns();
+            n64_rdp_stats rs;
+            pthread_mutex_lock(&s_mu);
+            n64_rdp_get_stats(rdp, &rs);
+            pthread_mutex_unlock(&s_mu);
             if (p_iter) {
                 uint64_t busy = it - p_iter - p_iter_idle;
                 pacc.host_frames++;
                 pacc.over_1 += busy > p_frame_ns;
                 pacc.over_2 += busy > 2 * p_frame_ns;
-                if (busy > p_worst)
-                    p_worst = busy;
-                if (busy > p_worst_run)
-                    p_worst_run = busy;
+                if (busy > p_worst.busy || busy > p_worst_run.busy) {
+                    rt_worst w = {busy, pacc.core - p_iter_acc.core, pacc.vi - p_iter_acc.vi,
+                                  pacc.present - p_iter_acc.present, pacc.audio - p_iter_acc.audio,
+                                  rs.queue_ns - p_iter_rdp.queue_ns, rs.wait_ns - p_iter_rdp.wait_ns,
+                                  rs.scanout_ns - p_iter_rdp.scanout_ns, rs.dp_wait_ns - p_iter_rdp.dp_wait_ns};
+                    if (busy > p_worst.busy)
+                        p_worst = w;
+                    if (busy > p_worst_run.busy)
+                        p_worst_run = w;
+                }
             }
             p_iter = it;
             p_iter_idle = 0;
+            p_iter_acc = pacc;
+            p_iter_rdp = rs;
         }
         uint64_t work_t0 = now_ns(); /* the frame's work, for the performance hint (the sleep after it is not) */
 
@@ -1374,6 +1525,9 @@ int n64_runtime_run(const n64_runtime_opts *o)
         /* Fast-forward: `speed` N64 frames per shown frame (max: as many as fit in one display frame), no frame skip
          * (only the last frame's picture is made anyway). */
         int steps = rewinding ? 0 : ff ? (speed ? speed : 64) : 1, dirty = 0, skip = 0, on = display_on > 0;
+        int fresh = 1; /* a new picture made this host frame (0: the VI's picture had not changed, nothing made) */
+        const uint8_t *prgba = NULL; /* the picture straight from the Vulkan RDP's scanout (n64_display_rgba) */
+        int ppitch = 0;
         uint64_t frame_ns = 16683333, burst_end = now_ns() + 15000000;
         if (rewinding) { /* rewind held: one capture back per shown frame, no N64 frame runs, nothing heard */
             pthread_mutex_lock(&s_mu);
@@ -1382,6 +1536,7 @@ int n64_runtime_run(const n64_runtime_opts *o)
             uint64_t tv = now_ns();
             on = n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
             pacc.vi += now_ns() - tv;
+            pacc.pictures++;
             pthread_mutex_unlock(&s_mu);
         }
         if (++cheat_polls % 30 == 0)
@@ -1416,15 +1571,40 @@ int n64_runtime_run(const n64_runtime_opts *o)
             if (last) {
                 /* Frame skip: the picture of a frame the host is late for is not made nor shown (the frame itself
                  * ran). */
+                /* An unchanged picture is neither made nor skipped: frame skip decides on new pictures only (and
+                 * a picture skipped is still new at the next VI). */
                 int audio_low = audio && heard && !o->unpaced && host_audio_queued() < AUDIO_TARGET_FRAMES / 4;
-                skip = ff ? 0 : n64_runtime_frameskip(o->unpaced && fskip < 0 ? 0 : fskip, o->unpaced ? 0 : behind,
-                                                      frame_ns, audio_low, &skip_run);
-                if ((o->frames && frames + 1 >= o->frames) || (o->capture_path && o->capture_frame == frames + 1))
+                int forced = (o->frames && frames + 1 >= o->frames) ||
+                             (o->capture_path && o->capture_frame == frames + 1);
+                fresh = present_always || forced || n64_display_changed(m);
+                int fmode = o->unpaced && fskip < 0 ? 0 : fskip;
+                int64_t fbehind = o->unpaced ? 0 : behind;
+                skip = ff || !fresh ? 0
+                       : present_always ? n64_runtime_frameskip(fmode, fbehind, frame_ns, audio_low, &skip_run)
+                                        : n64_runtime_frameskip_picture(fmode, fbehind, frame_ns, audio_low, &skip_run);
+                if (forced)
                     skip = 0; /* the last frame of a bounded run is the screenshot; a capture is a capture */
                 uint64_t tv = now_ns();
-                on = skip ? display_on > 0 : n64_display(m, xrgb, max_w, max_h, &dw, &dh) == 0;
+                if (skip || !fresh) {
+                    on = display_on > 0;
+                } else {
+                    /* Upscaled: the scanout's own RGBA, no conversion nor copy (the last frame of a bounded run
+                     * keeps the XRGB picture: --screenshot writes it). */
+                    int last_frame = o->frames && frames + 1 >= o->frames;
+                    int r = rgba_direct && !last_frame ? n64_display_rgba(m, &prgba, &dw, &dh, &ppitch) : -2;
+                    if (r != 0) { /* -1: the upscaled scanout shows nothing, the 1x picture (without a second try) */
+                        prgba = NULL;
+                        on = n64_display(m, xrgb, r == -1 ? N64_SCREEN_MAX_W : max_w,
+                                         r == -1 ? N64_SCREEN_MAX_H : max_h, &dw, &dh) == 0;
+                    } else {
+                        on = 1;
+                    }
+                }
                 pacc.vi += now_ns() - tv;
                 skipped += (uint64_t)skip;
+                pacc.skipped += (uint64_t)skip;
+                pacc.pictures += (uint64_t)(fresh && !skip);
+                pacc.unchanged += (uint64_t)!fresh;
             }
             if (rumble_on)
                 rumble_drive(m, players, rumble_sent); /* RECOMP_RUMBLE=0: never */
@@ -1456,9 +1636,16 @@ int n64_runtime_run(const n64_runtime_opts *o)
                 break;
         }
 
-        if (skip) {
+        if (skip || !fresh) {
             /* keep the last picture and its size */
+        } else if (prgba && on && dw > 0 && dh > 0) {
+            if (dw != last_w || dh != last_h) {
+                printf("n64: display %d x %d at frame %llu\n", dw, dh, (unsigned long long)frames);
+                last_w = dw;
+                last_h = dh;
+            }
         } else if (!on || dw <= 0 || dh <= 0 || dw > max_w || dh > max_h) {
+            prgba = NULL;
             dw = last_w ? last_w : 320;
             dh = last_h ? last_h : 240;
             memset(xrgb, 0, (size_t)dw * (size_t)dh * sizeof xrgb[0]);
@@ -1496,26 +1683,43 @@ int n64_runtime_run(const n64_runtime_opts *o)
             pthread_mutex_lock(&s_mu);
             perf_mark(&pm_now, m, &pacc, t);
             pthread_mutex_unlock(&s_mu);
-            perf_fill(&pf, &pm_line, &pm_now, t - pm_line.t, p_worst, frame_ns, pack.table != NULL, rdp, rdp_threads,
-                      rw.ring != NULL);
+            perf_fill(&pf, &pm_line, &pm_now, t - pm_line.t, &p_worst, frame_ns, pack.table != NULL, rdp,
+                      rdp_threads, rw.ring != NULL);
             n64_runtime_perf_format(&pf, line, sizeof line);
             printf("n64: perf %s\n", line);
+            n64_runtime_perf_detail_format(&pf, line, sizeof line);
+            printf("n64: perf detail %s\n", line);
             pm_line = pm_now;
-            p_worst = 0;
+            memset(&p_worst, 0, sizeof p_worst);
             fflush(stdout);
             fps_t = t;
             fps_frames = 0;
         }
 
-        if (window && !skip) {
+        if (window && !skip && !fresh) {
+            /* The same picture: the window's texture drawn again (frame generation: nothing, it paces itself). */
+            uint64_t tp = now_ns();
+            host_window_present_again();
+            pacc.present += now_ns() - tp;
+        } else if (window && !skip) {
             uint64_t tp = now_ns();
             if (o->capture_path && o->capture_frame == frames)
                 host_window_capture(o->capture_path);
-            n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
             /* The VI's guard band (RECOMP_N64_CROP_EDGES): the columns either side are left out of the texture and
              * the rest still fills the 4:3 shape. */
             int cc = crop ? n64_runtime_crop_columns(dw) : 0;
-            host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
+            if (prgba) { /* one copy, GPU buffer -> texture (the shader shows it opaque: the VI's alpha is ignored) */
+                pthread_mutex_lock(&s_mu);
+                s_shared.px = prgba + 4 * cc;
+                s_shared.w = dw - 2 * cc;
+                s_shared.h = dh;
+                s_shared.pitch = ppitch;
+                pthread_mutex_unlock(&s_mu);
+                host_window_present_rgba_shared(prgba + 4 * cc, dw - 2 * cc, dh, ppitch, shared_last, NULL);
+            } else {
+                n64_runtime_xrgb_to_rgba(xrgb, rgba, (size_t)dw * (size_t)dh);
+                host_window_present_rgba(rgba + 4 * cc, dw - 2 * cc, dh, dw * 4);
+            }
             pacc.present += now_ns() - tp;
         }
         if (o->frames && frames >= o->frames)
@@ -1547,6 +1751,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
     }
 
     recomp_perf_hint_end();
+    if (rgba_direct) { /* the RDP's buffers go with the machine: the window keeps its own copy of the last picture */
+        host_window_keep_shared();
+        pthread_mutex_lock(&s_mu);
+        s_shared.px = NULL;
+        pthread_mutex_unlock(&s_mu);
+    }
     uint64_t t_end = now_ns();
     double secs = (double)(t_end - t0) / 1e9;
     printf("n64: %llu frames in %.1f s (%.2f fps), %llu skipped, %llu late resets\n", (unsigned long long)frames, secs,
@@ -1559,10 +1769,12 @@ int n64_runtime_run(const n64_runtime_opts *o)
         pthread_mutex_lock(&s_mu);
         perf_mark(&pm_end, m, &pacc, t_end);
         pthread_mutex_unlock(&s_mu);
-        perf_fill(&s_perf_last, &pm_run, &pm_end, t_end - pm_run.t, p_worst_run, p_frame_ns,
+        perf_fill(&s_perf_last, &pm_run, &pm_end, t_end - pm_run.t, &p_worst_run, p_frame_ns,
                   pack.table != NULL, rdp, rdp_threads, rw.ring != NULL);
         n64_runtime_perf_format(&s_perf_last, line, sizeof line);
         printf("n64: perf over the run: %s\n", line);
+        n64_runtime_perf_detail_format(&s_perf_last, line, sizeof line);
+        printf("n64: perf detail over the run: %s\n", line);
     }
     saves_flush("exit");
     if (o->screenshot) {

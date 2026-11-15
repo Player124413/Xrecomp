@@ -44,4 +44,13 @@
     <string name="TE_RESET">Réinitialiser</string>
     <string name="TE_CANCEL">Annuler</string>
     <string name="TE_SAVE">Enregistrer</string>
+    <!-- XBA-212 : robustesse du tactile. -->
+    <string name="TE_BANNER">Modification de la disposition tactile</string>
+    <string name="TE_UNPLAYABLE">Non enregistrée : gardez une croix ou un stick et au moins un bouton d\'action visibles.</string>
+    <string name="CTL_TOUCH_RESET">Réinitialiser les dispositions</string>
+    <string name="CTL_TOUCH_RESET_DETAIL">Supprime toutes les dispositions enregistrées de la manette tactile, pour toutes les consoles et tous les jeux : la disposition habituelle revient.</string>
+    <string name="CTL_TOUCH_RESET_DONE">Dispositions tactiles réinitialisées (%1$d supprimées).</string>
+    <string name="TOUCH_HINT_CONTROLLER">Manette tactile masquée : une manette est connectée. Touchez l\'écran du jeu pour l\'afficher, ou voyez Réglages › Commandes › Manette tactile › Afficher.</string>
+    <string name="TOUCH_HINT_PANEL">Manette tactile masquée tant que l\'écran du bas montre le panneau. Touchez l\'écran du jeu pour l\'afficher.</string>
+    <string name="TOUCH_NATIVE_FAILED">La manette tactile ne peut pas atteindre le jeu (appel natif absent). Partagez le journal depuis le menu du jeu.</string>
 </resources>

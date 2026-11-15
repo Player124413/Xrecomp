@@ -148,6 +148,12 @@ void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user)
     (void)user;
 }
 
+void n64_rdp_get_thread_hook(n64_rdp_thread_hook *fn, void **user)
+{
+    *fn = NULL;
+    *user = NULL;
+}
+
 /* n64_rdp.h: nothing is batched here. */
 int n64_rdp_set_threads(n64_rdp *d, int n)
 {

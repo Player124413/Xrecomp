@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <utility>
 #include "thread_id.hpp"
+#include "thread_hook.hpp"
 
 #ifdef PARALLEL_RDP_SHADER_DIR
 #include "global_managers.hpp"
@@ -102,6 +103,7 @@ private:
 		// Avoid benign errors in logging.
 		// This thread never actually needs the thread ID.
 		Util::register_thread_index(0);
+		ThreadHookScope hook_scope; // xboxrecomp-android patch (thread_hook.hpp)
 
 		for (;;)
 		{

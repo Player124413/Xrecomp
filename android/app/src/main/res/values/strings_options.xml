@@ -54,6 +54,8 @@
     <string name="OPT_RUMBLE">Controller rumble</string>
     <string name="OPT_RUMBLE_DETAIL">On: the controller vibrates when the game asks for it (the PlayStation DualShock, the Nintendo 64 Rumble Pak, the Xbox pad). Off: never. For every console. Applies the next time a game starts. (RECOMP_RUMBLE)</string>
 
+    <string name="ROM_RESUME">Resume</string>
+    <string name="ROM_START">Start</string>
     <string name="ROM_OPTIONS">Game settings</string>
     <string name="ROM_OPT_PICTURE">This game\'s picture</string>
     <string name="ROM_OPT_DATA">Game data</string>
@@ -79,5 +81,5 @@
     <string name="GS_OWN_COUNT">%1$d of its own</string>
     <string name="GS_HINT_RESET">Reset</string>
     <string name="MENU_GAME_SETTINGS">Game settings</string>
-    <string name="MENU_GS_NEXT_START">This game\'s own values: they apply the next time it starts</string>
+    <string name="MENU_GS_NEXT_START">This game\'s own values: the picture changes at once, the rest when the game restarts</string>
 </resources>

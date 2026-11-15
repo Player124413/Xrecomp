@@ -111,6 +111,10 @@ int  xbox_HostWindowMain(int (*guest_main)(void));
  * RECOMP_XBOX_SHADER, else RECOMP_SHADER; none before the window opens, without a GL renderer or after the shader
  * failed to build). Any thread. */
 int  xbox_FramebufferWindowShaderActive(void);
+/* A live change of the picture shader (the in-game menu), any thread: preset HOST_SHADER_* (lcd draws none here),
+ * strength -1..100, curvature and ghosting 0..100. The window takes it at its next turn and draws the shown frame
+ * again, also while the game is held. */
+void xbox_FramebufferWindowSetShader(int preset, int strength, int curvature, int ghosting);
 /* The window as drawn (shader included, a binary PPM of the whole drawable) is written to path after the next
  * frame it draws; one capture per call, any thread. Screenshots (xbox_FramebufferDumpBmp) stay the raw frame. */
 void xbox_FramebufferWindowCapture(const char *path);

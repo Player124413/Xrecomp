@@ -11,7 +11,9 @@ FILE writes it there too.
 line, or `ADDR` alone for code of the EXE). Code whose bytes match the EXE becomes a function of the EXE; any other
 code (overlays loaded at run time, code copied or patched in RAM) is lifted from the recorded bytes, as functions
 keyed by address and hash, so overlays sharing an address coexist in one pack. An address recorded with 8
-(PS1_RECOMP_VARIANTS) different contents is code generated at run time: it stays interpreted.
+(PS1_RECOMP_VARIANTS) different contents is code generated at run time: it stays interpreted. Records of one address
+that agree over their common length are the same code (an older runtime recorded it again under another length):
+they are merged, the longest kept, and only contents that differ inside their common length count as different.
 """
 
 import argparse
@@ -70,21 +72,38 @@ def fn_name(f):
     return "ps1_rc_" + base
 
 
+def merge_variants(discovered):
+    """{addr: [contents]} of the records with bytes: records of an address that agree over their common length are
+    one content (the longest kept); the others are its variants."""
+    out = {}
+    for addr, data in discovered:
+        if not data:
+            continue
+        reps = out.setdefault(addr, [])
+        for k, r in enumerate(reps):
+            n = min(len(r), len(data))
+            if r[:n] == data[:n]:
+                if len(data) > len(r):
+                    reps[k] = data
+                break
+        else:
+            reps.append(data)
+    return out
+
+
 def build_functions(exe, discovered):
     """Discovery over the EXE and the recorded RAM code. Returns (functions, stats)."""
     img = Image(exe.text_addr, exe.text, "exe")
     exe_seeds = {exe.pc0}
     records = []
-    variants = {}
-    for addr, data in discovered:
-        if data is not None:
-            variants.setdefault(addr, set()).add(data)
+    variants = merge_variants(discovered)
     volatile = {a for a, v in variants.items() if len(v) >= VARIANTS}
     for addr, data in discovered:
         if data is None:
             exe_seeds.add(addr)
-        elif addr not in volatile:
-            records.append((addr, data))
+    for addr in sorted(variants):
+        if addr not in volatile:
+            records += [(addr, data) for data in variants[addr]]
     # recorded code: functions found in the recorded bytes; the ones identical to the EXE go to the EXE
     ram_funcs = {}
     stats = {"records": len(records), "blobs": 0, "ram_functions": 0, "exe_seeds_from_records": 0,

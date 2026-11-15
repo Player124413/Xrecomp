@@ -81,6 +81,13 @@ public class GameMenuTest {
         @Override public void shareLog() { shareLogs++; }
         @Override public void backToLauncher() { launchers++; }
         @Override public void quit() { quits++; }
+        /** The pictures sent live, and the « Restart to apply » restarts. */
+        final List<ConsoleVideo.Picture> pictures = new ArrayList<>();
+        int restarts;
+        @Override public void setPicture(ConsoleVideo.Picture p) { pictures.add(p); }
+        @Override public void restartGame() { restarts++; }
+        Runnable onMenuOpened;    // XBA-212: what the activity does when the menu opens (closes the touch editor)
+        @Override public void menuOpened() { if (onMenuOpened != null) onMenuOpened.run(); }
 
         Boolean touch;            // the on-screen pad: null = none
         ConsolePadMap console;    // a GBA / PS1 / N64 game's mapping, null = an Xbox game
@@ -1308,6 +1315,144 @@ public class GameMenuTest {
         press(KeyEvent.KEYCODE_BUTTON_B);
         menu.row(GameMenu.Item.QUIT).performClick();
         assertEquals(activity.getString(R.string.MENU_QUIT_CONFIRM_SUB), menu.row(GameMenu.Item.QUIT).subtitle);
+    }
+
+    // ---- Live picture, Restart to apply ----------------------------------------------------------------------------
+
+    private ConsoleVideo.Picture lastPicture() {
+        return host.pictures.isEmpty() ? null : host.pictures.get(host.pictures.size() - 1);
+    }
+
+    /**
+     * A GBA game's scale, filter and shader are sent to the game at once (one picture per real change, none for a
+     * choice that draws the same); none of them asks for a restart.
+     */
+    @Test
+    public void consolePictureAppliedLive() throws Exception {
+        String key = "gba-AXVE-1A2B3C4D";
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/quest.gba", "Pocket Quest", key);
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertTrue(host.pictures.isEmpty());
+        Widgets.MenuRow scale = menu.row(GameMenu.Item.SCALE), filter = menu.row(GameMenu.Item.FILTER);
+        scale.performClick();   // aspect, its own: what it already shows
+        assertTrue(host.pictures.isEmpty());
+        scale.performClick();   // integer
+        assertEquals(1, host.pictures.size());
+        assertEquals("integer", lastPicture().scale);
+        assertEquals("nearest", lastPicture().filter);   // the GBA's own
+        assertFalse(lastPicture().xbox);
+        filter.performClick();  // nearest, its own: the same
+        filter.performClick();  // linear
+        assertEquals(2, host.pictures.size());
+        assertEquals("linear", lastPicture().filter);
+        Widgets.MenuRow sh = menu.row(GameMenu.Item.SHADER);
+        sh.performClick();      // None, its own
+        sh.performClick();      // Sharp
+        assertEquals("sharp", lastPicture().shader);
+        assertEquals(-1, lastPicture().strength);
+        assertNotNull(menu.row(GameMenu.Item.RESTART));
+        assertEquals(View.GONE, menu.row(GameMenu.Item.RESTART).getVisibility());
+        assertFalse(menu.restartPending());
+    }
+
+    /**
+     * An N64 game's internal resolution waits for the game to start again: « Restart to apply » shows at the top of
+     * Settings, a first press arms it, a second restarts; going back to the value it started with hides it.
+     */
+    @Test
+    public void restartToApply() throws Exception {
+        String key = "n64-NZLP-B2055FBD";
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/zelda.z64", "Zelda", key);
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow restart = menu.row(GameMenu.Item.RESTART);
+        assertEquals(View.GONE, restart.getVisibility());
+        assertSame("hidden: not focusable", menu.row(GameMenu.Item.PERF), menu.rowsForTest().get(0));
+        Widgets.MenuRow up = menu.row(GameMenu.Item.UPSCALE);
+        up.performClick();   // native (1x), its own: what it started with
+        assertEquals(View.GONE, restart.getVisibility());
+        up.performClick();   // 2x
+        assertEquals(View.VISIBLE, restart.getVisibility());
+        assertSame("first of the page", restart, menu.rowsForTest().get(0));
+        assertTrue(host.pictures.isEmpty());
+        shot("restart-n64");
+        restart.performClick();
+        assertEquals(activity.getString(R.string.MENU_RESTART_CONFIRM), restart.title);
+        assertEquals(0, host.restarts);
+        restart.performClick();
+        assertEquals(1, host.restarts);
+        up.cycler.step(-1);  // native
+        up.cycler.step(-1);  // as in Settings: as it started
+        assertEquals(View.GONE, restart.getVisibility());
+        // Back on the page later: still in step with the game.
+        menu.row(GameMenu.Item.UPSCALE).performClick();
+        menu.row(GameMenu.Item.UPSCALE).performClick();
+        press(KeyEvent.KEYCODE_BUTTON_B);
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        assertEquals(View.VISIBLE, menu.row(GameMenu.Item.RESTART).getVisibility());
+    }
+
+    /** An Xbox title: its shader goes live (scale and filter none of its business), its language waits for a restart. */
+    @Test
+    public void xboxShaderLiveLanguageRestart() throws Exception {
+        java.io.File dir = new java.io.File(activity.getFilesDir(), "live-xbox");
+        TestSupport.write(new java.io.File(dir, "default.xbe"), TestSupport.xbe(0x4D5300D1, "Game"));
+        GameStore.remember(activity, dir.getPath(), "Game");
+        menu.release();
+        build();
+        menu.open("Back");
+        menu.row(GameMenu.Item.SETTINGS).performClick();
+        Widgets.MenuRow sh = menu.row(GameMenu.Item.SHADER);
+        sh.performClick();   // None
+        sh.performClick();   // Sharp
+        sh.performClick();   // Scanlines
+        assertEquals("scanlines", lastPicture().shader);
+        assertTrue(lastPicture().xbox);
+        assertNull(lastPicture().scale);
+        assertEquals(View.GONE, menu.row(GameMenu.Item.RESTART).getVisibility());
+        menu.row(GameMenu.Item.LANGUAGE).performClick();   // English, its own: what Android's language gave it
+        assertEquals(View.GONE, menu.row(GameMenu.Item.RESTART).getVisibility());
+        menu.row(GameMenu.Item.LANGUAGE).performClick();   // another
+        assertEquals(View.VISIBLE, menu.row(GameMenu.Item.RESTART).getVisibility());
+        // The Game settings page has it too, and its picture options are live as well.
+        menu.row(GameMenu.Item.GAME_SETTINGS).performClick();
+        assertEquals(View.VISIBLE, menu.row(GameMenu.Item.RESTART).getVisibility());
+    }
+
+    /**
+     * The drawer is narrow: a setting whose label and widest choice do not fit side by side is stacked (the label
+     * whole on its line, the value under it), so no label is cut to a few letters; screenshots in both languages.
+     */
+    @Test
+    public void narrowRowsKeepTheirLabel() throws Exception {
+        String key = "n64-NZLP-B2055FBD";
+        GameStore.rememberRomLaunch(activity, "/sdcard/roms/zelda.z64", "Zelda", key);
+        for (String loc : new String[] { "en", "fr" }) {
+            RuntimeEnvironment.setQualifiers(loc + "-w1920dp-h1080dp-land-mdpi");
+            menu.release();
+            build();
+            menu.open("Back");
+            menu.row(GameMenu.Item.SETTINGS).performClick();
+            idle(400);
+            Widgets.MenuRow sh = menu.row(GameMenu.Item.SHADER);
+            assertTrue("« As in Settings (None) » beside « Picture shader » does not fit: stacked", sh.stackedForTest());
+            assertFalse("Volume and its percentage fit on one line", menu.row(GameMenu.Item.VOLUME).stackedForTest());
+            sh.requestFocusFromTouch();
+            sh.performClick();
+            sh.performClick();   // Sharp, its own: value and badge under the label
+            shot("settings-console-" + loc);
+            for (int i = 0; i < 6; i++)
+                press(KeyEvent.KEYCODE_DPAD_DOWN);
+            shot("settings-console-end-" + loc);
+            menu.row(GameMenu.Item.GAME_SETTINGS).performClick();
+            shot("game-settings-console-" + loc);
+            GameSettings.reset(activity.getFilesDir(), key);
+        }
     }
 
     // ---- Screenshots -----------------------------------------------------------------------------------------------

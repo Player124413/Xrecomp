@@ -62,6 +62,21 @@ void host_window_set_event_hook(host_window_event_fn fn, void *user);
  * window's own texture and presents it. Returns 1, or 0 on a GL error. */
 int host_window_present_rgba(const void *px, int w, int h, int pitch);
 
+/* host_window_present_rgba for pixels the caller keeps (the N64 runtime: the Vulkan RDP's mapped scanout): no copy
+ * is made for host_window_screenshot_bmp; it asks `last` instead, on its own thread, for the picture shown last: a
+ * malloc'd copy, tightly packed RGBA rows, its size; 0, or -1 when there is none any more. The next
+ * host_window_present_rgba (a copy kept again) or host_window_keep_shared (the caller's pixels are going: `last` is
+ * asked now and the copy kept) ends it. */
+typedef int (*host_window_last_fn)(void *user, uint8_t **px, int *w, int *h);
+int host_window_present_rgba_shared(const void *px, int w, int h, int pitch, host_window_last_fn last, void *user);
+void host_window_keep_shared(void);
+
+/* Draws the picture the last host_window_present_rgba uploaded again (no upload, no copy kept for the screenshot):
+ * for a frame whose picture did not change (the N64 runtime: a VI without a new picture). With frame generation
+ * running it draws nothing (the pacer shows its FIFO at its own due times and wants distinct pictures only). Returns
+ * 1, or 0 when nothing was presented yet or on a GL error. */
+int host_window_present_again(void);
+
 /* Frame generation (XBA-186, docs/technical/framegen.md « Console window »): in a build with XBOXRECOMP_LSFG,
  * under RECOMP_LSFG=1, host_window_open starts the pacer (the LSFG bridge when built in, the fake generator under
  * RECOMP_LSFG_FAKE=1; "[LSFG] off: ..." and the usual present when it cannot). host_window_present_rgba then hands
@@ -145,6 +160,12 @@ int host_window_shader_parse(const char *v);
 const char *host_window_shader_name(int preset);
 void host_window_env_shader(const char *console_var, int def, HostShader *out);
 void host_window_shader_env(const char *console_var);
+
+/* A live change of the picture (the in-game menu, docs/android/app-shell.md « In-game menu »), from any thread:
+ * scale (HOST_SCALE_*), filter (HOST_FILTER_*) and, when s is not NULL, the shader, taken by the presenting thread
+ * at its next present (host_window_present_rgba / _texture / _again), never in the middle of a frame. scale or
+ * filter -1 keeps the current one. A later request replaces one not yet taken. */
+void host_window_request_picture(int scale, int filter, const HostShader *s);
 
 /* The rate the window presents at, from any thread (the Android companion
  * panel and FPS overlay when no Xbox presenter runs): *fps_centi frames per

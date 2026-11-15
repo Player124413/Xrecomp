@@ -39,20 +39,29 @@ public class TouchInGameTest {
     @Rule
     public final TestSupport.StockTheme stockTheme = new TestSupport.StockTheme();
 
-    /** ShellActivity's touch routing without SDL: the editor, then the menu's swipe, then the views. */
+    /** ShellActivity's touch and key routing without SDL: the editor or a reveal, then the menu, then the views. */
     public static class GameActivity extends Activity {
         TouchControls touch;
         GameMenu menu;
 
         @Override
         public boolean dispatchTouchEvent(MotionEvent e) {
-            if (touch != null && touch.editor != null)
-                return touch.editor.dispatchTouchEvent(e);
-            if (touch != null && e.getActionMasked() == MotionEvent.ACTION_DOWN)
-                touch.onTouch();
+            if (touch != null && touch.takeTouch(e, menu != null && menu.isOpen()))
+                return true;
             if (menu != null && menu.dispatchTouch(e))
                 return true;
             return super.dispatchTouchEvent(e);
+        }
+
+        @Override
+        public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+            if (touch != null && touch.editor != null)
+                return touch.editor.key(e) || super.dispatchKeyEvent(e);
+            if (touch != null)
+                touch.onKey(e);
+            if (menu != null && menu.dispatchKey(e))
+                return true;
+            return super.dispatchKeyEvent(e);
         }
     }
 

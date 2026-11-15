@@ -63,6 +63,7 @@ class FnLifter:
             if t is not None and func.start <= t < func.end:
                 self.targets.add(t)
         self.io = io_accesses(func)  # accesses to known constant addresses off cached RDRAM: through the core
+        self.seg = None  # (emitted, units, leaders) while function() emits
 
     def inside(self, a):
         return self.f.start <= a < self.f.end
@@ -289,13 +290,26 @@ class FnLifter:
             self.fallbacks += 1
         if code:
             self.emit("    %s\n" % code)
+        idle = self.idle_loop(a)
         if i.cls == "branch" and not i.likely:
-            self.emit("    if (tk) { %s }\n" % self.go(i.target))
+            self.emit("    if (tk) { %s%s }\n" % (idle, self.go(i.target)))
             self.emit("    %s\n" % self.go(a + 8))
         elif static:
-            self.emit("    %s\n" % self.go(i.target))
+            self.emit("    %s%s\n" % (idle, self.go(i.target)))
         else:
             self.emit("    RC_EXIT64(jt);\n")
+
+    def idle_loop(self, a):
+        """For a branch to itself over a NOP (an idle loop: nothing changes while it spins), the RC_IDLE that runs at
+        once the turns its segment check would let run, else ""."""
+        i = self.img.ins(a)
+        if (i.cls != "branch" or i.link or i.name.startswith("bc1") or i.target != a or self.img.word(a + 4) != 0
+                or self.seg is None):
+            return ""
+        emitted, units, leaders = self.seg
+        if a not in leaders:
+            return ""
+        return "RC_IDLE(%d); " % segment_ticks(emitted, emitted.index(a), units, leaders)
 
     # ---- one function ----
     def function(self, comments=True):
@@ -328,6 +342,7 @@ class FnLifter:
             if a in leaders:
                 end = a
         codes = {}
+        self.seg = (emitted, units, leaders)
         for k, a in enumerate(emitted):
             self.out = []
             if img.ins(a).is_transfer():

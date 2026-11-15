@@ -15,9 +15,16 @@ from RDRAM (overlays, decompressed or TLB-mapped code: the discovered file of n6
    encoding).
 3. Linear sweep: compiler output is contiguous, so the gaps the recursive pass left between functions inside the
    text it reached are swept: each run of valid code after padding is a function (its calls are explored in turn).
-   Past the last function reached, the sweep goes on only while candidates look like functions (a plausible start,
-   valid instructions, a return), so data after the text is not taken for code. Whatever is wrong here costs only
-   compile time: an entry runs only when its bytes are in memory.
+   Past the last function reached, and over a gap larger than GAP_MAX between two functions reached (code reached
+   only through a function pointer the scan missed is rarely that long: such a gap is data, e.g. the audio banks or
+   compressed files that follow a game's boot segment in the boot megabyte), the sweep goes on only while candidates
+   look like functions (a plausible start, valid instructions, a return), so data is not taken for code.
+   An entry runs only when its bytes are in memory, but each one the runtime finds in a page costs a content check,
+   so implausible code is left out everywhere: a function (other than a seed: the boot PC, the vectors, recorded
+   code) whose body holds an instruction compilers do not emit (implausible(): LL / SC, the immediate traps, COP0
+   other than the moves, TLB operations and ERET, a write to r0) is not taken, nor what it calls. This is what keeps a JAL
+   of the boot segment into an overlay's run-time address (which holds data in the boot image) from pulling the data
+   there in as code.
 4. RSP microcode is data: it is never in an executable image of the CPU, and records are only made of code the CPU
    ran, so it is never lifted.
 """
@@ -89,6 +96,23 @@ def recomp_hash(words):
 
 
 BAD = ("reserved", "cop3", "cop2", "lwc2", "swc2", "ldc2", "sdc2")
+GAP_MAX = 0x10000  # bytes: a larger gap between functions reached is swept strictly (3. above)
+RARE = {"ll", "lld", "sc", "scd", "tgei", "tgeiu", "tlti", "tltiu", "teqi", "tnei"}
+COP0_OK = {0, 1, 4, 5}  # MFC0 DMFC0 MTC0 DMTC0
+COP0_CO = {0x01, 0x02, 0x06, 0x08, 0x18}  # TLBR TLBWI TLBWR TLBP ERET
+
+
+def implausible(i):
+    """An instruction compilers do not emit (data decoded as code): see 3. above."""
+    if i.name in BAD or i.name in RARE:
+        return True
+    if i.name == "cop0":
+        sub = (i.word >> 21) & 31
+        return not (sub in COP0_OK or (sub == 0x10 and (i.word & 63) in COP0_CO and not (i.word >> 6) & 0x7FFFF))
+    if i.cls in ("alu", "ovf") and i.word != 0 and i.name != "sync":
+        d = i.rd if (i.word >> 26) == 0 else i.rt
+        return d == 0
+    return False
 
 
 def plausible_code(img, addr, n=4):
@@ -151,6 +175,7 @@ class Discovery:
         self.sweep = sweep
         self.cont = set()  # code after an internal unconditional branch that the sweep found: part of that function
         self.cont_owner = {}
+        self.rejected = set()  # starts whose body is implausible (data)
         self.tables = {}  # jump table address -> entries
         self.stats = {"seeds": len(self.seeds), "jal": 0, "tail": 0, "pointers": 0, "jump_tables": 0, "swept": 0}
 
@@ -317,16 +342,27 @@ class Discovery:
                     out.add(v)
         return out
 
+    def plausible_body(self, start, end):
+        """No implausible instruction in [start, end)."""
+        return not any(implausible(self.img.ins(a)) for a in range(start, end, 4) if self.img.contains(a))
+
     def _explore(self, work, done):
         img = self.img
         new = 0
         while work:
             s = work.pop()
             if s in done:
+                if s in self.rejected:
+                    self.starts.discard(s)  # found again (a pointer in data): still data
                 continue
             done.add(s)
             found = set()
-            self._walk(s, img.end, found)
+            end = self._walk(s, img.end, found)
+            if s not in self.seeds and not self.plausible_body(s, end):
+                self.starts.discard(s)  # data taken for code: neither a function nor a source of calls
+                self.rejected.add(s)
+                self.stats["implausible"] = self.stats.get("implausible", 0) + 1
+                continue
             for kind, t in found:
                 if t not in self.starts and plausible_code(img, t):
                     self.starts.add(t)
@@ -398,9 +434,14 @@ class Discovery:
             if end <= a:
                 a += 4
                 continue
+            if not self.plausible_body(a, end):
+                if strict:
+                    break
+                a += 4
+                continue
             if strict:
                 body = [img.ins(x) for x in range(a, end, 4)]
-                if any(i.name in BAD for i in body) or not any(ends_function(i) for i in body):
+                if not any(ends_function(i) for i in body):
                     break
             out.append(a)
             fstart = owner = a
@@ -431,7 +472,7 @@ class Discovery:
             if s >= text_end:
                 break
             if s > prev:
-                added.update(self._sweep_gap(prev, s, strict=False, fstart=pstart))
+                added.update(self._sweep_gap(prev, s, strict=s - prev > GAP_MAX, fstart=pstart))
             if e > prev:
                 prev, pstart = e, self.cont_owner.get(s, s)
         if prev < img.end:
@@ -441,9 +482,26 @@ class Discovery:
             added = {None}  # continuations only: extents changed, sweep again
         return added
 
+    def _inner_seeds(self):
+        """Recorded code (no sweep): the seeds inside the body of the function an earlier seed starts (the runtime
+        records where the interpreter had to start: function starts, but also return points and branch targets).
+        They are not starts of their own, which would cut that function into pieces each left through the
+        dispatcher; the function's entry switch resumes there."""
+        inner, end = set(), None
+        for s in sorted(self.seeds):
+            if end is not None and s < end:
+                inner.add(s)
+                continue
+            end = self._walk(s, self.img.end, set())
+        return inner
+
     def run(self):
         img = self.img
         done = set()
+        if not self.sweep or img.origin == "ram":
+            inner = self._inner_seeds()
+            self.starts -= inner
+            self.stats["inner_seeds"] = len(inner)
         # from the seeds first (this finds the jump tables), then from the code pointers in data, then the sweep
         self._explore(sorted(self.starts), done)
         ptrs = self._pointer_scan()

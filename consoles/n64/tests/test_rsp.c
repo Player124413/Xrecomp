@@ -92,7 +92,7 @@ static void bus_wrote(void *ctx, uint32_t addr, uint32_t len)
 
 static void new_rsp(void)
 {
-    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL, wrote_map ? bus_wrote : NULL};
+    n64_rcp_bus bus = {rdram, RDRAM_SIZE, bus_raise, bus_clear, NULL, wrote_map ? bus_wrote : NULL, NULL};
     if (S)
         n64_rsp_destroy(S);
     S = n64_rsp_create(bus);

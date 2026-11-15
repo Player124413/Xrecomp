@@ -11,12 +11,19 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Toast;
 
 /**
  * The on-screen pad in the game (XBA-42): ShellActivity owns one. It puts a {@link TouchPadView} over SDL's surface
  * (under the in-game menu), shows it per {@link TouchSettings#visible} — Auto: while no controller is connected
  * (InputManager's device list, watched) and none has been used since — and sends its state through the
  * {@link OverlayMixer} to input_overlay.h. Never shown while the companion panel is on the second screen.
+ *
+ * <p>XBA-212: when Auto (or the panel) hides it — the AYN Thor's built-in controls count as a controller — a tap on
+ * the game's screen (outside the in-game menu's swipe strip) reveals it ({@link #takeTouch}); that first tap only
+ * reveals, nothing reaches the game. It stays until no finger touched the screen for {@link #REVEAL_MS} or a physical
+ * button is pressed. Hidden that way, the player gets a hint once per process (log and toast). The touch layout
+ * editor never outlives the moment: it is cancelled on start, stop, resume and when the in-game menu opens.
  */
 final class TouchControls implements InputManager.InputDeviceListener {
     /** Whether a game controller is connected now (PadDevices in the game, a fake in the tests). */
@@ -38,12 +45,35 @@ final class TouchControls implements InputManager.InputDeviceListener {
     /** The touch layout editor while it is open over the game, else null. */
     TouchEditor editor;
 
+    /** How long a pad revealed by a tap stays without a touch (XBA-212). */
+    static final long REVEAL_MS = 10_000;
+    /** Shown by a tap while Auto or the panel would hide it; the rest of the revealing gesture is swallowed. */
+    private boolean revealed, swallowing;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable revealTimeout = new Runnable() {
+        @Override
+        public void run() {
+            if (!revealed)
+                return;
+            if (view.pad.fingers() > 0) {   // still held: wait for the fingers to lift
+                handler.postDelayed(this, REVEAL_MS);
+                return;
+            }
+            revealed = false;
+            update("no touch for " + REVEAL_MS / 1000 + " s");
+        }
+    };
+    /** The hints already given in this process (XBA-212): once each. */
+    private static boolean hintedController, hintedPanel;
+
     TouchControls(Activity a, OverlayMixer mixer, Devices devices) {
         this.activity = a;
         this.mixer = mixer;
         this.devices = devices;
         view = new TouchPadView(a, mixer::touch);
         view.setVisibility(View.GONE);
+        view.fallBackListener = why -> Log.w(LauncherActivity.TAG, "shell: touch layout " + padLayout
+                                                                   + " set aside for the defaults: " + why);
     }
 
     /** The console's layout (XBA-158 / XBA-168 / XBA-174): its own buttons, set before start. */
@@ -64,6 +94,19 @@ final class TouchControls implements InputManager.InputDeviceListener {
         if (!r.layout.isEmpty())
             Log.i(LauncherActivity.TAG, "shell: touch layout " + padLayout + (r.perGame ? " (this game's)" : "")
                                         + ", " + r.layout.entries.size() + " control(s) changed");
+        if (r.repaired > 0)
+            Log.w(LauncherActivity.TAG, "shell: touch layout " + padLayout + ": " + r.repaired
+                                        + " invalid entr" + (r.repaired == 1 ? "y" : "ies") + " repaired");
+    }
+
+    /**
+     * Cancels the touch layout editor if it is open (the layout before it kept): the game going to the background,
+     * starting, resuming, the in-game menu opening (XBA-212: it must never be left over the game).
+     */
+    void closeEditor(String why) {
+        if (editor != null)
+            editor.cancel(why);
+        view.setAlpha(1f);   // whatever happened to the editor, the live pad is drawn again
     }
 
     /**
@@ -97,6 +140,9 @@ final class TouchControls implements InputManager.InputDeviceListener {
 
     /** onStart: the settings again (the launcher may have changed them), the device watch, the decision. */
     void start() {
+        closeEditor("game start");   // never restored on a start
+        revealed = swallowing = false;
+        handler.removeCallbacks(revealTimeout);
         settings = TouchSettings.load(activity);
         view.apply(settings);
         loadLayout();
@@ -108,6 +154,9 @@ final class TouchControls implements InputManager.InputDeviceListener {
 
     /** onStop: hidden, released, the watch off. */
     void stop() {
+        closeEditor("background");
+        revealed = swallowing = false;
+        handler.removeCallbacks(revealTimeout);
         InputManager im = (InputManager)activity.getSystemService(Context.INPUT_SERVICE);
         if (im != null)
             im.unregisterInputDeviceListener(this);
@@ -145,11 +194,90 @@ final class TouchControls implements InputManager.InputDeviceListener {
     }
 
     void onKey(KeyEvent e) {
+        if (e.getAction() == KeyEvent.ACTION_DOWN && physical(e.getSource()))
+            unreveal("button pressed");
         onInput(e.getSource());
     }
 
     void onMotion(MotionEvent e) {
+        if (physical(e.getSource()) && pushed(e))
+            unreveal("stick or trigger pushed");
         onInput(e.getSource());
+    }
+
+    private static boolean physical(int source) {
+        return (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+               || (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+               || (source & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
+    }
+
+    /** A joystick motion that is a real push (half way), not a resting stick's noise. */
+    private static boolean pushed(MotionEvent e) {
+        int[] axes = { MotionEvent.AXIS_X, MotionEvent.AXIS_Y, MotionEvent.AXIS_Z, MotionEvent.AXIS_RZ,
+                       MotionEvent.AXIS_HAT_X, MotionEvent.AXIS_HAT_Y, MotionEvent.AXIS_LTRIGGER,
+                       MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_BRAKE, MotionEvent.AXIS_GAS };
+        for (int a : axes)
+            if (Math.abs(e.getAxisValue(a)) > 0.5f)
+                return true;
+        return false;
+    }
+
+    /** A pad revealed by a tap hidden again (a physical control used). */
+    private void unreveal(String why) {
+        if (!revealed)
+            return;
+        revealed = false;
+        handler.removeCallbacks(revealTimeout);
+        update(why);
+    }
+
+    /** Whether a tap may reveal the pad now: hidden by Auto or the panel, not Off, not hidden from the menu. */
+    private boolean mayReveal() {
+        return !checked && !shown && settings.mode != TouchSettings.Mode.OFF && !Boolean.FALSE.equals(forced);
+    }
+
+    boolean revealed() {
+        return revealed;
+    }
+
+    /**
+     * The game activity's dispatchTouchEvent, first (XBA-212): true when the event is taken here, so it goes no
+     * further. The touch layout editor takes everything while open. A finger down on the game's screen while Auto or
+     * the panel hides the pad reveals it (outside the in-game menu's swipe strip, menuOpen false), and the rest of
+     * that gesture is swallowed: the first tap only reveals. A touch while revealed keeps it up.
+     */
+    boolean takeTouch(MotionEvent e, boolean menuOpen) {
+        if (editor != null) {
+            editor.dispatchTouchEvent(e);
+            return true;
+        }
+        int a = e.getActionMasked();
+        if (a == MotionEvent.ACTION_DOWN) {
+            onTouch();
+            swallowing = false;
+            if (!menuOpen && mayReveal() && !inMenuStrip(e.getX())) {
+                revealed = true;
+                update("tap: revealed");
+                swallowing = shown;
+            }
+        }
+        if (revealed && (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_POINTER_DOWN)) {
+            handler.removeCallbacks(revealTimeout);
+            handler.postDelayed(revealTimeout, REVEAL_MS);
+        }
+        if (swallowing) {
+            if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL)
+                swallowing = false;
+            return true;
+        }
+        return false;
+    }
+
+    /** The in-game menu's swipe strip on the left edge (MenuTriggers.EdgeSwipe: 3 % of the width, at least 20 dp). */
+    private boolean inMenuStrip(float x) {
+        View root = activity.getWindow().getDecorView();
+        float density = activity.getResources().getDisplayMetrics().density;
+        return x <= Math.max(20 * density, root.getWidth() * MenuTriggers.EdgeSwipe.EDGE_FRAC);
     }
 
     /** A touch on the screen with no controller connected brings an Auto pad back after a controller was used. */
@@ -192,9 +320,37 @@ final class TouchControls implements InputManager.InputDeviceListener {
     }
 
     void update(String why) {
-        boolean want = forced != null ? forced && !panel
+        boolean auto = forced != null ? forced && !panel
                                       : TouchSettings.visible(settings.mode, devices.any(), used, panel);
+        boolean want = auto || (revealed && settings.mode != TouchSettings.Mode.OFF && !Boolean.FALSE.equals(forced));
+        if (!want)
+            revealed = false;
         show(!checked && want, why);
+        if (!checked && !want && forced == null && settings.mode != TouchSettings.Mode.OFF)
+            hint();
+    }
+
+    /** Once per process: why the pad is not there, and how to bring it (XBA-212). */
+    private void hint() {
+        boolean byPanel = panel;
+        if (byPanel ? hintedPanel : hintedController)
+            return;
+        if (byPanel)
+            hintedPanel = true;
+        else
+            hintedController = true;
+        String text = activity.getString(byPanel ? R.string.TOUCH_HINT_PANEL : R.string.TOUCH_HINT_CONTROLLER);
+        Log.i(LauncherActivity.TAG, "shell: " + text);
+        try {
+            Toast.makeText(activity, text, Toast.LENGTH_LONG).show();
+        } catch (RuntimeException e) {
+            Log.w(LauncherActivity.TAG, "shell: touch hint: no toast", e);
+        }
+    }
+
+    /** For the tests: the hints may be given again. */
+    static void resetHints() {
+        hintedController = hintedPanel = false;
     }
 
     private void show(boolean on, String why) {

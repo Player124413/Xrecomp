@@ -23,6 +23,7 @@
 
 #include <SDL.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,6 +222,24 @@ static int run_core(void)
     return s_fail;
 }
 
+/* host_window_present_rgba_shared's caller: its picture on demand (W x H RGBA, tightly packed), counted. */
+static const uint8_t *s_shared_px;
+static int s_shared_calls;
+static int shared_last(void *user, uint8_t **px, int *w, int *h)
+{
+    (void)user;
+    s_shared_calls++;
+    if (!s_shared_px)
+        return -1;
+    *px = malloc(320 * 240 * 4);
+    if (!*px)
+        return -1;
+    memcpy(*px, s_shared_px, 320 * 240 * 4);
+    *w = 320;
+    *h = 240;
+    return 0;
+}
+
 static int run_window(void)
 {
     enum { W = 320, H = 240 };
@@ -269,6 +288,9 @@ static int run_window(void)
             break;
         }
     }
+    /* The same picture drawn again (a console frame without a new picture): one more present, no upload. */
+    CHECK(host_window_present_again() == 1);
+    frames++;
     host_window_info(&info);
     printf("host_layer window: %llu frames, GL%s %d.%d, %dx%d, vsync %d, pads 0x%x, buttons seen 0x%x\n",
            (unsigned long long)info.frames, info.gles ? " ES" : "", info.gl_major, info.gl_minor, info.drawable_w,
@@ -300,6 +322,28 @@ static int run_window(void)
         CHECK(hdr[0] == 'B' && hdr[1] == 'M' && bw == W && bh == H && hdr[28] == 24);
         unlink(bmp);
         host_window_set_aspect(0, 0);
+
+        /* A picture the caller keeps (host_window_present_rgba_shared): the screenshot asks for it, no copy made at
+         * present; host_window_keep_shared takes the copy when the caller's pixels go. */
+        s_shared_calls = 0;
+        s_shared_px = (const uint8_t *)px;
+        CHECK(host_window_present_rgba_shared(px, W, H, W * 4, shared_last, NULL));
+        CHECK(s_shared_calls == 0);
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 1);
+        unlink(bmp);
+        host_window_keep_shared();
+        CHECK(s_shared_calls == 2);
+        s_shared_px = NULL; /* gone: the window's copy answers */
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 2);
+        unlink(bmp);
+        CHECK(host_window_present_rgba_shared(px, W, H, W * 4, shared_last, NULL));
+        CHECK(host_window_screenshot_bmp(bmp) == -1); /* the caller has none any more */
+        CHECK(host_window_present_rgba(px, W, H, W * 4)); /* a kept copy again */
+        CHECK(host_window_screenshot_bmp(bmp) == 0);
+        CHECK(s_shared_calls == 3);
+        unlink(bmp);
     }
     host_window_close();
     CHECK(host_window_stats(&fps, &presented) == 0);
@@ -394,6 +438,15 @@ static double bench(const uint32_t *px, int preset, int n)
     for (int i = 0; i < n; i++)
         host_window_present_rgba(px, SW, SH, SW * 4);
     return (double)(xbox_HostNowNs() - t0) / 1e6 / n;
+}
+
+/* run_shaders' live change, from a thread of its own as the Android UI thread's would be. */
+static void *live_request(void *arg)
+{
+    HostShader s = { HOST_SHADER_SCANLINES, 80, 0, 0 };
+    (void)arg;
+    host_window_request_picture(HOST_SCALE_STRETCH, HOST_FILTER_NEAREST, &s);
+    return NULL;
 }
 
 static int run_shaders(void)
@@ -617,6 +670,24 @@ static int run_shaders(void)
         memcpy(&bh, hdr + 22, 4);
         CHECK(bw == SW && bh == SH && pix[0] == 128 && pix[1] == 128 && pix[2] == 128);
         unlink(bmp);
+    }
+
+    /* A live change (the in-game menu, host_window_request_picture): from another thread, taken by the next
+     * present only; -1 / NULL keep what is there. */
+    {
+        pthread_t th;
+        host_window_set_scaling(HOST_SCALE_ASPECT, HOST_FILTER_LINEAR);
+        host_window_set_shader(NULL);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(pthread_create(&th, NULL, live_request, NULL) == 0);
+        pthread_join(th, NULL);
+        CHECK(host_window_shader_active() == HOST_SHADER_NONE);   /* not before the next present */
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+        host_window_request_picture(-1, -1, NULL);
+        CHECK(host_window_present_rgba(flat, SW, SH, SW * 4));
+        CHECK(host_window_shader_active() == HOST_SHADER_SCANLINES);
+        host_window_set_shader(NULL);
     }
 
     /* A shader that does not build: none, logged once, presents still work. */

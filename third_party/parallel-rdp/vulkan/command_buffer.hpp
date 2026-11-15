@@ -955,4 +955,8 @@ struct CommandBufferUtil
 #endif
 
 using CommandBufferHandle = Util::IntrusivePtr<CommandBuffer>;
+
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the "Stalled compile" pipelines (a compile of 5 ms
+// or more outside the async thread) since the process started, and their total time, from any thread.
+void get_stalled_compiles(uint64_t &count, uint64_t &ns);
 }

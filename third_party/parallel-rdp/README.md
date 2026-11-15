@@ -75,6 +75,30 @@ which must say whether a custom driver such as Turnip is in use):
 The N64 runtime uses them (`consoles/n64/runtime/n64_rdp_vk.cpp`): a check at start, then default shaders, no
 subgroups, ubershader, else the software RDP (`consoles/README.md`).
 
+Counters for the N64 runtime's performance line (`n64: perf`, `consoles/README.md`), host-only, no effect on drawing:
+
+- `parallel-rdp/command_ring.*`: `enqueue_command` times its waits for room in a full ring (`blocked_waits`,
+  `blocked_ns`; no clock read when there is room); `parallel-rdp/rdp_device.*`: `CommandProcessor::get_ring_blocked`.
+- `vulkan/command_buffer.*`: `get_stalled_compiles`, the count and total time of the "Stalled compile" pipelines.
+
+Threads in the host's performance session (the N64 runtime's `n64_rdp_set_thread_hook`, which also covers the
+software RDP's band threads):
+
+- `parallel-rdp/thread_hook.hpp` (new), `parallel-rdp/command_ring.cpp`: `set_thread_hook` keeps a process-wide hook
+  and `ThreadHookScope` calls it on its own thread at start (1) and end (0).
+- `parallel-rdp/command_ring.cpp` (`CommandRing::thread_loop`, the command ring worker) and
+  `parallel-rdp/worker_thread.hpp` (`WorkerThread::main_loop`: the fence executor and the pipeline compile worker)
+  hold a `ThreadHookScope` for their whole loop.
+
+The command ring (the N64 runtime's deferred DP interrupt, `consoles/n64/runtime/n64_core.c`):
+
+- `parallel-rdp/rdp_device.cpp`: `ring.init(..., 1u << 18)`, 1 MB of commands instead of 16 KB (about 100
+  triangles), so the emulation thread does not wait for the GPU while a frame's display list is queued.
+
+The pipeline cache is unchanged Granite: `Device::init_pipeline_cache(data, size)`, `get_pipeline_cache_size` and
+`get_pipeline_cache_data`, called by the N64 runtime (`n64_vk_cache.h`), as this tree has no filesystem for Granite's
+own `cache://pipeline_cache.bin`.
+
 The shaders are unchanged, so the precompiled SPIR-V is upstream's.
 
 ## Symbols

@@ -15,6 +15,10 @@ package fr.adserver.xrecomp;
  * launch until its console's runtime exists), else GONE. A console that plays its files as they are (the GBA,
  * XBA-157): Running, No file access, Preparing / Queued while its Prepare runs or waits (XBA-158: a pack speeds it up,
  * it is never needed), else Ready while it is in a library folder, else GONE.
+ *
+ * A Ready game whose Prepare is in this APK also says how prepared it is (prepared(), for the card's label): Prepared,
+ * Prepared but out of date (its pack was lifted by an older toolkit than this APK's: PackFreshness OLDER_TOOLKIT), or,
+ * for a console that plays without a pack, Not prepared.
  */
 final class GameState {
     private GameState() {}
@@ -50,6 +54,8 @@ final class GameState {
         Pack.Check pack = Pack.Check.NO_PACK;
         /** False when the pack was built from another XBE than the active one (Pack.builtFrom). */
         boolean packMatches = true;
+        /** The valid pack was lifted by an older toolkit than this APK's (PackFreshness.Verdict.OLDER_TOOLKIT). */
+        boolean packOlderToolkit;
         /** The shell refused the pack (EXTRA_BAD_PACK) and the launcher dropped it. */
         boolean packDropped;
         /** status.json of this title, or null. */
@@ -115,6 +121,26 @@ final class GameState {
         if (Library.KIND_CFG.equals(f.dataKind))
             return Chip.DATA_MISSING;
         return Chip.GONE;
+    }
+
+    /**
+     * How prepared a Ready game is, for its card: NONE when the chip is not READY or without the toolchain (nothing to
+     * say: the card shows no state); else PREPARED with a valid pack from this APK's toolkit, OUTDATED with a valid pack
+     * from an older one (it plays, Prepare again gets the fixes), NOT_PREPARED for a console game without a valid pack
+     * (it plays in the interpreter). A Ready Xbox title always has a valid pack (else NEEDS_PREPARING or PACK_INVALID).
+     *
+     * « New code found » (Pack.newlyDiscovered) is left to Home: playing finds new code nearly every session, so it would
+     * mark most played games, and it is not the app being newer than the pack.
+     */
+    enum Prepared { NONE, PREPARED, OUTDATED, NOT_PREPARED }
+
+    static Prepared prepared(Facts f, Chip c) {
+        if (c != Chip.READY || !f.toolchain)
+            return Prepared.NONE;
+        boolean valid = f.pack == Pack.Check.VALID && (f.console != Console.XBOX || f.packMatches);
+        if (!valid)
+            return f.console == Console.XBOX ? Prepared.NONE : Prepared.NOT_PREPARED;
+        return f.packOlderToolkit ? Prepared.OUTDATED : Prepared.PREPARED;
     }
 
     /** The game can start now (the launcher may still have to end another running game first). */

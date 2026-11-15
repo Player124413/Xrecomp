@@ -40,6 +40,8 @@ final class LibraryScreen {
          */
         java.util.Set<String> noAccess = Collections.emptySet();
         String runningTid, importingTid;
+        /** This APK's toolkit digest (Toolchain.toolkitDigest, cached), "" when unknown: packs from another are out of date. */
+        String toolkit = "";
         PrepareProtocol.Queue queue = new PrepareProtocol.Queue();
         long now = System.currentTimeMillis();
         /** Title IDs whose pack the shell refused this session. */
@@ -59,6 +61,8 @@ final class LibraryScreen {
         LibraryIndex.Item active;
         GameState.Facts facts;
         GameState.Chip chip;
+        /** How prepared a Ready game is (GameState.prepared): the card's label then. */
+        GameState.Prepared prepared = GameState.Prepared.NONE;
         /** 1 for the next Prepare to run, 0 when not queued. */
         int queuePos;
 
@@ -205,6 +209,13 @@ final class LibraryScreen {
                 String sha = recordData ? en.record.xbeSha256 : en.active != null ? en.active.xbeSha256 : "";
                 f.packMatches = packMatches(filesDir, en.tid, sha);
             }
+            // Out of date: a valid pack lifted by an older toolkit (pack.json is small; the APK's digest is cached).
+            if (f.pack == Pack.Check.VALID && isSha256(env.toolkit)) {
+                String packToolkit = en.realTid() ? Pack.toolkitSha256(filesDir, en.tid)
+                                                  : Pack.toolkitSha256OfKey(filesDir, en.tid);
+                f.packOlderToolkit = PackFreshness.judge(null, null, packToolkit, env.toolkit)
+                                     == PackFreshness.Verdict.OLDER_TOOLKIT;
+            }
             f.prepare = PrepareProtocol.readStatus(new File(new File(new File(filesDir, "prepare"), en.tid),
                                                             "status.json"));
             f.prepareFresh = f.prepare != null && env.now - f.prepare.updatedAt < PREPARE_FRESH_MS;
@@ -215,6 +226,7 @@ final class LibraryScreen {
         f.importingTid = env.importingTid;
         en.facts = f;
         en.chip = GameState.chip(f);
+        en.prepared = GameState.prepared(f, en.chip);
         en.queuePos = env.queue.position(en.tid);
     }
 
@@ -285,6 +297,39 @@ final class LibraryScreen {
         }
     }
 
+    /** The label of a Ready game's preparation (GameState.prepared); 0 for NONE. */
+    static int preparedLabel(GameState.Prepared p) {
+        switch (p) {
+        case PREPARED:
+            return R.string.LIB_CHIP_PREPARED;
+        case OUTDATED:
+            return R.string.LIB_CHIP_OUTDATED;
+        case NOT_PREPARED:
+            return R.string.LIB_CHIP_NOT_PREPARED;
+        default:
+            return 0;
+        }
+    }
+
+    /** The colour of an entry's state: its preparation's when it says one (OK, WARN, neutral), else its chip's. */
+    static int chipColor(Entry e) {
+        switch (e.prepared) {
+        case PREPARED:
+            return Theme.OK;
+        case OUTDATED:
+            return Theme.WARN;
+        case NOT_PREPARED:
+            return Theme.TEXT_DIM;   // neutral: it plays, in the interpreter
+        default:
+            return chipColor(e.chip);
+        }
+    }
+
+    /** The card shows a state line: not for a plain « Ready » (no toolchain: nothing worth saying). */
+    static boolean chipShown(Entry e) {
+        return e.chip != GameState.Chip.READY || e.prepared != GameState.Prepared.NONE;
+    }
+
     static int chipColor(GameState.Chip c) {
         switch (c) {
         case RUNNING:
@@ -305,10 +350,12 @@ final class LibraryScreen {
         }
     }
 
-    /** « Queued (2) » for a queued entry, else the chip's label. */
+    /** « Queued (2) » for a queued entry, « Prepared · out of date » etc. for a Ready one, else the chip's label. */
     static String chipText(Context c, Entry e) {
         if (e.chip == GameState.Chip.QUEUED && e.queuePos > 0)
             return c.getString(R.string.LIB_QUEUED_N, e.queuePos);
+        if (e.prepared != GameState.Prepared.NONE)
+            return c.getString(preparedLabel(e.prepared));
         return c.getString(chipLabel(e.chip));
     }
 

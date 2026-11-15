@@ -71,6 +71,7 @@ typedef struct rc_missed {
     uint32_t n;      /* words */
     uint64_t hash;
     uint32_t *words;
+    uint32_t next1;  /* 1 + the next record of the same address, 0: none */
     bool owner;      /* words is this record's copy (else a view into an earlier record's) */
 } rc_missed;
 
@@ -92,6 +93,8 @@ struct ps1_rc_state {
     uint64_t *missed_set;       /* (addr, hash) keys, open addressing, 2 * MISSED_MAX slots, 0 = empty */
     uint32_t *var_addr;         /* address -> contents recorded there (PS1_RECOMP_VARIANTS at most), same layout */
     uint8_t *var_cnt;
+    uint32_t *var_head1;        /* and 1 + its first record (0: none yet), its last */
+    uint32_t *var_tail1;
     rc_line cache[CACHE_SIZE];
 };
 
@@ -169,7 +172,11 @@ static struct ps1_rc_state *state(ps1_machine *m)
         s->missed_set = calloc(2 * MISSED_MAX, sizeof *s->missed_set);
         s->var_addr = calloc(2 * MISSED_MAX, sizeof *s->var_addr);
         s->var_cnt = calloc(2 * MISSED_MAX, 1);
-        if (!s->missed || !s->missed_set || !s->var_addr || !s->var_cnt) {
+        s->var_head1 = calloc(2 * MISSED_MAX, sizeof *s->var_head1);
+        s->var_tail1 = calloc(2 * MISSED_MAX, sizeof *s->var_tail1);
+        if (!s->missed || !s->missed_set || !s->var_addr || !s->var_cnt || !s->var_head1 || !s->var_tail1) {
+            free(s->var_head1);
+            free(s->var_tail1);
             free(s->missed);
             free(s->missed_set);
             free(s->var_addr);
@@ -266,6 +273,8 @@ void ps1_recomp_free(ps1_machine *m)
     free(s->missed_set);
     free(s->var_addr);
     free(s->var_cnt);
+    free(s->var_head1);
+    free(s->var_tail1);
     free(s);
     m->rc = NULL;
 }
@@ -377,28 +386,49 @@ static bool missed_insert(struct ps1_rc_state *s, uint64_t key)
     return true;
 }
 
-/* The variant counter of an address (NULL when the map is full). */
-static uint8_t *variants(struct ps1_rc_state *s, uint32_t addr)
+/* The slot of an address in the variant map (UINT32_MAX when the map is full). */
+static uint32_t variants(struct ps1_rc_state *s, uint32_t addr)
 {
     uint32_t i = (addr * 2654435761u >> 8) & (2 * MISSED_MAX - 1);
     for (uint32_t probes = 0; probes < 2 * MISSED_MAX; probes++) {
-        if (s->var_cnt[i] == 0 || s->var_addr[i] == addr) {
+        if ((s->var_cnt[i] == 0 && s->var_head1[i] == 0) || s->var_addr[i] == addr) {
             s->var_addr[i] = addr;
-            return &s->var_cnt[i];
+            return i;
         }
         i = (i + 1) & (2 * MISSED_MAX - 1);
     }
-    return NULL;
+    return UINT32_MAX;
 }
 
+static void add_record(struct ps1_rc_state *s, uint32_t slot, rc_missed r)
+{
+    s->missed[s->nmissed] = r;
+    if (s->var_tail1[slot])
+        s->missed[s->var_tail1[slot] - 1].next1 = s->nmissed + 1;
+    else
+        s->var_head1[slot] = s->nmissed + 1;
+    s->var_tail1[slot] = ++s->nmissed;
+}
+
+/* A record is new only when no record of pc agrees with RAM over their common length: the same code reached again
+ * (as a view into another record, of another length) is recorded once, and only contents that differ count as
+ * variants (PS1_RECOMP_VARIANTS: code generated at run time); views are never counted. */
 static void record_missed(ps1_machine *m, struct ps1_rc_state *s, uint32_t pc)
 {
     uint32_t off = pc & 0x1FFFFFu;
     if (s->nmissed >= MISSED_MAX)
         return;
-    uint8_t *var = variants(s, pc);
-    if (!var || *var >= PS1_RECOMP_VARIANTS)
+    uint32_t slot = variants(s, pc);
+    if (slot == UINT32_MAX || s->var_cnt[slot] >= PS1_RECOMP_VARIANTS)
         return; /* code rewritten over and over at this address: left to the interpreter */
+    uint32_t n = PS1_RECOMP_SNAPSHOT / 4;
+    if (off + n * 4 > PS1_RAM_SIZE)
+        n = (PS1_RAM_SIZE - off) / 4;
+    for (uint32_t i = s->var_head1[slot]; i; i = s->missed[i - 1].next1) {
+        const rc_missed *r = &s->missed[i - 1];
+        if (!memcmp(m->ram + off, r->words, (size_t)(r->n < n ? r->n : n) * 4))
+            return;
+    }
     /* Inside a recent record whose bytes are still there: a view into its copy. */
     for (uint32_t k = s->nmissed, seen = 0; k > 0 && seen < 32; k--, seen++) {
         const rc_missed *r = &s->missed[k - 1];
@@ -406,17 +436,12 @@ static void record_missed(ps1_machine *m, struct ps1_rc_state *s, uint32_t pc)
             uint32_t w = (pc - r->addr) / 4;
             if (!memcmp(m->ram + off, r->words + w, (size_t)(r->n - w) * 4)) {
                 uint64_t hash = ps1_recomp_hash(r->words + w, r->n - w);
-                if (missed_insert(s, missed_key(pc, hash))) {
-                    s->missed[s->nmissed++] = (rc_missed){pc, r->n - w, hash, r->words + w, false};
-                    (*var)++;
-                }
+                if (missed_insert(s, missed_key(pc, hash)))
+                    add_record(s, slot, (rc_missed){pc, r->n - w, hash, r->words + w, 0, false});
                 return;
             }
         }
     }
-    uint32_t n = PS1_RECOMP_SNAPSHOT / 4;
-    if (off + n * 4 > PS1_RAM_SIZE)
-        n = (PS1_RAM_SIZE - off) / 4;
     uint64_t hash = hash_ram(m->ram, off, n * 4);
     if (!missed_insert(s, missed_key(pc, hash)))
         return;
@@ -424,8 +449,8 @@ static void record_missed(ps1_machine *m, struct ps1_rc_state *s, uint32_t pc)
     if (!w)
         return;
     memcpy(w, m->ram + off, n * 4);
-    s->missed[s->nmissed++] = (rc_missed){pc, n, hash, w, true};
-    (*var)++;
+    add_record(s, slot, (rc_missed){pc, n, hash, w, 0, true});
+    s->var_cnt[slot]++;
 }
 
 size_t ps1_recomp_missed(ps1_machine *m, uint32_t *out, size_t max)

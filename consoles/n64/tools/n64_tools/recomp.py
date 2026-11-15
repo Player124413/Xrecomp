@@ -11,6 +11,9 @@ line, or `ADDR` alone for code of the ROM's static images). Code whose bytes mat
 of that image; any other code (overlays loaded at run time, decompressed or TLB-mapped code) is lifted from the
 recorded bytes, as functions keyed by address and hash, so overlays sharing an address coexist in one pack. An address
 recorded with 8 (N64_RECOMP_VARIANTS) different contents is code generated at run time: it stays interpreted.
+Records of one address that agree over their common length are the same code recorded from further or less far (a
+runtime before 2026-11-15 recorded the same code again under another length): they are merged, the longest kept, and
+only contents that differ inside their common length count as different.
 """
 
 import argparse
@@ -60,6 +63,25 @@ def read_discovered(path):
     return out
 
 
+def merge_variants(discovered):
+    """{addr: [contents]} of the records with bytes: records of an address that agree over their common length are
+    one content (the longest kept); the others are its variants."""
+    out = {}
+    for addr, blob in discovered:
+        if blob is None or not blob:
+            continue
+        reps = out.setdefault(addr, [])
+        for k, r in enumerate(reps):
+            n = min(len(r), len(blob))
+            if r[:n] == blob[:n]:
+                if len(blob) > len(r):
+                    reps[k] = blob
+                break
+        else:
+            reps.append(blob)
+    return out
+
+
 def static_images(rom):
     """The images of the ROM's boot (rom.py) and of the PI DMA copies found statically (dma.py)."""
     imgs = [Image(s.vaddr, s.data, s.origin, s.executable) for s in rom.segments]
@@ -75,16 +97,14 @@ def build_functions(rom, discovered):
     data = imgs + dma
     seeds = {rom.entry} | set(VECTORS)
     records = []
-    variants = {}
-    for addr, blob in discovered:
-        if blob is not None:
-            variants.setdefault(addr, set()).add(blob)
+    variants = merge_variants(discovered)
     volatile = {a for a, v in variants.items() if len(v) >= VARIANTS}
     for addr, blob in discovered:
         if blob is None:
             seeds.add(addr)
-        elif addr not in volatile:
-            records.append((addr, blob))
+    for addr in sorted(variants):
+        if addr not in volatile:
+            records += [(addr, blob) for blob in variants[addr]]
     stats = {"records": len(records), "blobs": 0, "ram_functions": 0, "seeds_from_records": 0,
              "volatile_addresses": len(volatile), "dma_segments": [hx(d.base) + "+0x%X" % len(d.data) for d in dma],
              "images": [{"base": hx(im.base), "size": len(im.data), "origin": im.origin} for im in code]}

@@ -23,6 +23,10 @@
     <string name="LIB_FOLDER_REMOVE_SUB">Nothing in it is deleted</string>
     <string name="LIB_FOLDER_REMOVED">%1$s is no longer in the library. Nothing in it was deleted.</string>
     <string name="LIB_CHIP_NOT_PLAYABLE_YET">Not playable yet</string>
+    <!-- A Ready game's card when the app can prepare it (GameState.prepared) -->
+    <string name="LIB_CHIP_PREPARED">Prepared</string>
+    <string name="LIB_CHIP_OUTDATED">Prepared · out of date</string>
+    <string name="LIB_CHIP_NOT_PREPARED">Not prepared</string>
     <string name="LIB_NOT_PLAYABLE_NOTE">%1$s games are listed but not playable yet: their console comes in a later version.</string>
     <string name="LIB_TRUNCATED">Too many files: the scan of a folder stopped at 5,000 entries</string>
     <string name="LIB_SCANNING">Scanning the library folders… %1$d found</string>
@@ -97,6 +101,7 @@
     <string name="ROM_NEW_CODE">Prepared · %1$d new addresses found · prepare again</string>
     <string name="ROM_NOT_PREPARED_NOTE">Play starts the game at once, in the interpreter. Prepare translates it for this device (a few minutes) so that it runs natively; you can play meanwhile.</string>
     <string name="ROM_PREPARED_NOTE">The game runs from its preparation. Code it does not cover still runs in the interpreter and is noted for the next Prepare.</string>
+    <string name="ROM_OLDER_TOOLKIT_NOTE">This update translates games better. Prepare again to get its fixes; until then the game plays as before. Your saves are kept.</string>
     <string name="ROM_NEW_CODE_NOTE">Your last games ran code the preparation had missed (%1$d addresses). Prepare again to translate it too; Play works meanwhile.</string>
     <string name="ROM_FAILED_NOTE">The preparation failed (%1$s); the game still plays in the interpreter. See what failed for the log.</string>
     <string name="ROM_PREPARED_DONE">%1$s is prepared: it now runs natively.</string>

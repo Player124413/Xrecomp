@@ -247,4 +247,42 @@ public class PackTest {
         assertEquals(0, Pack.newlyDiscovered(files, key));
         assertEquals(0, Pack.newlyDiscovered(files, "gba-AXVE-00000000"));       // no pack
     }
+
+    @Test
+    public void countsALargeN64DiscoveredFileLineByLine() throws Exception {
+        File files = tmp.newFolder("files");
+        String key = "n64-NZLP-B2055FBD";
+        File disc = Pack.discoveredFile(files, key);
+        disc.getParentFile().mkdirs();
+        // The N64's records carry their code bytes: 20 000 records of ~1.2 KB is past the old 16 MB read cap.
+        StringBuilder bytes = new StringBuilder();
+        for (int i = 0; i < 1200; i++)
+            bytes.append('A');
+        try (java.io.Writer w = new java.io.BufferedWriter(new java.io.FileWriter(disc))) {
+            w.write("# discovered\n");
+            for (int i = 0; i < 20000; i++)
+                w.write(String.format(java.util.Locale.ROOT, "%08X %016X %s\n", 0x80000000L + 4L * i, (long)i, bytes));
+        }
+        assertTrue(disc.length() > (16 << 20));
+        assertEquals(20000, Pack.countAddresses(disc));
+    }
+
+    @Test
+    public void readsTheToolkitDigestOfAConsolePack() throws Exception {
+        File files = tmp.newFolder("files");
+        String key = "n64-NZLP-B2055FBD";
+        assertEquals(null, Pack.toolkitSha256OfKey(files, key));                  // no pack
+        File dir = new File(new File(files, "packs"), key);
+        TestSupport.write(new File(dir, "pack.json"), new JSONObject().put("console", "n64").toString());
+        assertEquals(null, Pack.toolkitSha256OfKey(files, key));                  // a pack that does not say
+        String sha = "99A89F952E3AEA1439384C960410BA6DF759B4948967973B749EC2182A04B40F";
+        TestSupport.write(new File(dir, "pack.json"),
+                          new JSONObject().put("console", "n64").put("toolkit_sha256", sha).toString());
+        assertEquals(sha.toLowerCase(java.util.Locale.ROOT), Pack.toolkitSha256OfKey(files, key));
+        assertEquals(PackFreshness.Verdict.OLDER_TOOLKIT,
+                     PackFreshness.judge(null, null, Pack.toolkitSha256OfKey(files, key),
+                                         "6cc36f77a67aa0999511c4e8349eca5a60664b061fbcd9b4159eea3b1e5ed5d0"));
+        assertEquals(PackFreshness.Verdict.CURRENT,
+                     PackFreshness.judge(null, null, Pack.toolkitSha256OfKey(files, key), sha.toLowerCase()));
+    }
 }

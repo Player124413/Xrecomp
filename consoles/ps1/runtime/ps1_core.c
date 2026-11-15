@@ -256,6 +256,11 @@ uint32_t ps1_reg(ps1_machine *m, int r) { return (r >= 0 && r < 32) ? m->r[r] : 
 uint32_t ps1_pc(ps1_machine *m) { return m->pc; }
 uint32_t ps1_cop0(ps1_machine *m, int r) { return (r >= 0 && r < 32) ? m->cop0[r] : 0; }
 uint64_t ps1_cycles(ps1_machine *m) { return m->cycles; }
+void ps1_irq_regs(ps1_machine *m, uint32_t *i_stat, uint32_t *i_mask)
+{
+    *i_stat = m->i_stat;
+    *i_mask = m->i_mask;
+}
 uint64_t ps1_frames(ps1_machine *m) { return m->frames; }
 uint8_t *ps1_ram(ps1_machine *m)
 {

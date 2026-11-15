@@ -12,11 +12,11 @@ import sys
 import pytest
 
 from n64_tools import dma, rom
-from n64_tools.discover import Discovery, Function, Image, recomp_hash
+from n64_tools.discover import GAP_MAX, Discovery, Function, Image, implausible, recomp_hash
 from n64_tools.isa import decode
 from n64_tools.lift import FnLifter
 from n64_tools.recomp import main as recomp_main
-from n64_tools.recomp import read_discovered
+from n64_tools.recomp import build_functions, merge_variants, read_discovered
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
@@ -166,6 +166,62 @@ def test_discovery():
     assert main.end > 0x80000430
     f = Function(img, 0x80000450, 0x8000045C)
     assert f.hash == recomp_hash(img.words(0x80000450, 0x8000045C))
+
+
+def test_data_is_not_code():
+    # main JALs a function at its run-time address, which holds data in the image (an overlay loaded later, the
+    # audio of a boot megabyte): LL / SC, a trap, a write to r0. Neither it, nor what it "calls", nor the data swept
+    # between main and it (a gap larger than GAP_MAX) is taken for code.
+    base = 0x80000400
+    far = base + GAP_MAX + 0x1000
+    w = [i_type(0x09, 29, 29, -24 & 0xFFFF), j_type(0x03, far), NOP, JR_RA, NOP]
+    w += [0] * ((far - base) // 4 - len(w))
+    w += [i_type(0x30, 4, 5, 0), i_type(0x38, 4, 5, 0), j_type(0x03, base + 0x2000), r_type(0x33, 4, 5),
+          JR_RA, NOP]
+    data = be(w)
+    junk = be([i_type(0x09, 4, 5, 8), r_type(0x21, 4, 5, 0), JR_RA, NOP] * 4)  # writes r0 (ADDU zero, a0, a1)
+    data = data[:0x2000] + junk + data[0x2000 + len(junk):]
+    img = Image(base, data, "boot")
+    funcs = Discovery(img, {base}).run()
+    assert {f.start for f in funcs} == {base}
+    assert implausible(decode(i_type(0x38, 4, 5, 0))) and not implausible(decode(NOP))
+    assert not implausible(decode(0x40806000))  # MTC0 (libultra's interrupt code)
+    assert not implausible(decode(r_type(0x34, 4, 0)))  # TEQ (a divide-by-zero check)
+
+
+def test_recorded_return_points_stay_inside():
+    # Records at a function's start, its return point after a JAL and a branch target inside it: one function (the
+    # entry switch resumes at the others), not three pieces left through the dispatcher.
+    base = 0x80200000
+    w = [i_type(0x09, 29, 29, -24 & 0xFFFF), j_type(0x03, 0x80300000), NOP,
+         i_type(0x09, 2, 2, 1), i_type(0x05, 2, 0, 1), NOP,
+         i_type(0x09, 29, 29, 24), JR_RA, NOP]
+    blob = be(w)
+    recs = [(base, blob), (base + 12, blob[12:]), (base + 24, blob[24:])]
+    funcs, _ = build_functions(rom.Rom(synthetic_rom()), recs)
+    ram = [f for f in funcs if f.image.origin == "ram"]
+    assert [(f.start, f.end) for f in ram] == [(base, base + len(blob))]
+
+
+def test_same_code_recorded_again_is_one_content():
+    # An older runtime recorded one PC again under several lengths (views into other records): one content, not
+    # variants; contents that differ inside their common length are variants.
+    code = be([i_type(0x09, 0, 2, k) for k in range(64)])
+    recs = [(0x80100000, code[:4 * n]) for n in (64, 40, 16, 8, 50, 30, 20, 12, 10)]
+    assert merge_variants(recs) == {0x80100000: [code]}
+    other = [(0x80100000, be([i_type(0x09, 0, 3, k)] * 8)) for k in range(8)]
+    assert len(merge_variants(recs + other)[0x80100000]) == 9
+
+
+def test_idle_loop_fast_forward():
+    # A branch to itself over a NOP: RC_IDLE on its taken path, with its segment's check ticks
+    w = [i_type(0x09, 0, 2, 1), i_type(0x04, 0, 0, -1 & 0xFFFF), NOP, JR_RA, NOP]
+    img = Image(0x80000400, be(w), "elf")
+    c = FnLifter(Function(img, 0x80000400, img.end), "n64_rc_idle").function(False)
+    assert "RC_IDLE(3); goto L_80000404;" in c and "RC_SEG(0x80000404u, 3, 2);" in c
+    w[2] = i_type(0x09, 0, 2, 1)  # not a NOP in the slot: a real loop
+    img = Image(0x80000400, be(w), "elf")
+    assert "RC_IDLE" not in FnLifter(Function(img, 0x80000400, img.end), "n64_rc_idle").function(False)
 
 
 def test_dma_segments():

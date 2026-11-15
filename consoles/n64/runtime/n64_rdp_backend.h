@@ -57,6 +57,16 @@ typedef struct n64_rdp_ops {
     int (*state_load)(void *d, const n64_rdp_common_state *c, const uint8_t *extra, size_t n);
     /* Host performance counters (n64_rdp.h n64_rdp_get_stats) since this back end's create. NULL: none. */
     void (*stats)(void *d, n64_rdp_stats *out);
+    /* n64_rdp.h n64_rdp_unreported: 1 when rows drawn but not yet reported through bus.wrote may overlap RDRAM
+     * [lo, hi). NULL: the back end is flushed instead (its pixels in RDRAM and reported). */
+    int (*unreported)(void *d, uint32_t lo, uint32_t hi);
+    /* n64_rdp.h n64_rdp_dp_complete (NULL: the back end never defers; n64_rdp_select.c raises the interrupt). */
+    void (*dp_complete)(void *d);
+    /* n64_rdp.h n64_rdp_scanout_prefetch / n64_rdp_scanout_forget (NULL: none). */
+    void (*scanout_prefetch)(void *d, const uint32_t *vi, uint32_t field, uint32_t lo, uint32_t hi);
+    void (*scanout_forget)(void *d);
+    /* n64_rdp.h n64_rdp_scanout_rgba (NULL: none; the back end's scanout op then serves n64_rdp_scanout alone). */
+    int (*scanout_rgba)(void *d, const uint32_t *vi, uint32_t field, const uint8_t **rgba, int *w, int *h, int *pitch);
 } n64_rdp_ops;
 
 /* The factor the next back end is asked to draw at (n64_rdp_select.c: n64_rdp_set_upscale, else the environment). */
@@ -65,6 +75,7 @@ int n64_rdp_upscale_wanted(void);
 extern const n64_rdp_ops n64_rdp_sw_ops; /* n64_rdp_select.c, over n64_rdp_sw_* */
 #ifdef N64_RDP_HAVE_VULKAN
 extern const n64_rdp_ops n64_rdp_vk_ops; /* n64_rdp_vk.cpp */
+void n64_rdp_vk_save_caches(const char *why); /* n64_rdp.h n64_rdp_save_caches, for the live Vulkan RDP */
 #endif
 
 #ifdef __cplusplus

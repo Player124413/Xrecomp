@@ -49,7 +49,8 @@ once, press **Play**. The whole recompiler (Python, capstone, LLVM) runs on the 
 - 📱 **Prepare on the device.** Analysis, lifting and compilation happen inside the app. No toolchain to install, no
   desktop step.
 - 🎮 **A real launcher, not a demo.** Library with cover art, gamepad-first UI, dual-screen support, per-game
-  options, save states with thumbnails, quick save / load on the pad, *resume where I left off*, fast-forward.
+  options, save states with thumbnails, quick save / load on the pad, *resume where I left off* (or start from the
+  boot), fast-forward.
 - 🖼️ **Better than the original.** PS1 and N64 at 2×, 4× or 8× internal resolution, frame generation (LSFG) on every
   console, custom Vulkan drivers (Mesa Turnip) downloaded from the app.
 - 📦 **One game, one app.** Turn a prepared game into its own standalone Android or macOS app.

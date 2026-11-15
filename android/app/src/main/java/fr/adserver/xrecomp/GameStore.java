@@ -131,6 +131,35 @@ final class GameStore {
         return writeSmall(c, AUTO_RESUME_FILE, on ? "1" : "0");
     }
 
+    /*
+     * A game's Home « Start » (GBA / PS1 / N64): this one launch begins from the console's boot, not where the player
+     * left off. A one-shot file the launcher writes and the next game process deletes as it reads it, so a later
+     * launch (or the in-game menu's Restart, a new process) resumes again.
+     */
+    static final String FRESH_START_FILE = "fresh_start";
+
+    static void requestFreshStart(Context c) {
+        writeSmall(c, FRESH_START_FILE, "1");
+    }
+
+    /** True once after {@link #requestFreshStart}: the file is deleted as it is read. */
+    static boolean takeFreshStart(Context c) {
+        File f = smallFile(c, FRESH_START_FILE);
+        boolean on = "1".equals(readSmall(c, FRESH_START_FILE));
+        f.delete();
+        return on;
+    }
+
+    /** The automatic slot (« where you left off ») of a GBA / PS1 / N64 game: save/&lt;console&gt;-&lt;KEY&gt;/auto.st. */
+    static File resumeState(Context c, String tid) {
+        return new File(new File(GameTheme.saveDir(c), tid), "auto.st");
+    }
+
+    /** Whether a game's Home offers Resume: « Resume where I left off » on and its automatic slot saved. */
+    static boolean canResume(Context c, String tid) {
+        return tid != null && autoResume(c) && resumeState(c, tid).isFile();
+    }
+
     static int gameVolume(Context c) {
         String v = readSmall(c, GAME_VOLUME_FILE);
         try {

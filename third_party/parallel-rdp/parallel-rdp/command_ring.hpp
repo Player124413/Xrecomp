@@ -47,6 +47,11 @@ public:
 
 	void enqueue_command(unsigned num_words, const uint32_t *words);
 
+	// xboxrecomp-android patch (third_party/parallel-rdp/README.md): how often and how long enqueue_command waited
+	// for room in a full ring (the producer's own thread reads them; nothing else writes them).
+	uint64_t blocked_waits = 0;
+	uint64_t blocked_ns = 0;
+
 private:
 	CommandProcessor *processor = nullptr;
 	std::thread thr;

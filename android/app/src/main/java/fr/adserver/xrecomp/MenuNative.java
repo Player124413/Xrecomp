@@ -59,4 +59,14 @@ final class MenuNative {
 
     /** XBA-182: true while fast-forward is on. */
     static native boolean nativeFastForwardOn();
+
+    /**
+     * The picture changed in the menu, shown at once: a GBA / PS1 / N64 game's scale ("aspect" / "integer" /
+     * "stretch"), filter ("linear" / "nearest") and shader (host_window_request_picture: from the next frame), an Xbox
+     * title's shader (xbox_FramebufferWindowSetShader: the window draws the shown frame again). shader: a preset name
+     * or "none"; strength -1 (the preset's own) or 0..100, curvature and ghosting 0..100. Scale and filter are
+     * ignored for an Xbox title.
+     */
+    static native void nativeSetPicture(boolean xbox, String scale, String filter, String shader, int strength,
+                                        int curvature, int ghosting);
 }

@@ -416,7 +416,7 @@
     <string name="VKD_LAST_UNSUPPORTED">Not compatible with the N64 renderer: at its last start this driver loaded, but the Nintendo 64 Vulkan renderer (paraLLEl-RDP) cannot run on it. The system driver was used.</string>
     <string name="VKD_LAST_OPEN_FAILED">At its last start this driver could not be opened: the system driver was used.</string>
     <string name="ROM_OPT_VK_DRIVER_DETAIL">The Vulkan driver this game\'s Nintendo 64 Vulkan renderer uses: as in Settings › Graphics › Vulkan driver, the device\'s own (System), or one of the installed drivers. Applies the next time the game starts.</string>
-    <string name="MENU_VK_DRIVER">Vulkan driver (next start)</string>
+    <string name="MENU_VK_DRIVER">Vulkan driver</string>
     <string name="VKD_INSTALLED_HELP">A: make it the default for every game (a game can have its own in its Options). X twice: delete it (games that chose it go back to the default).</string>
     <string name="VKD_KV_VERSION">Version</string>
     <string name="VKD_KV_SOURCE">Source</string>

@@ -21,6 +21,10 @@
     <string name="LIB_FOLDER_REMOVE_SUB">Rien n\'y est supprimé</string>
     <string name="LIB_FOLDER_REMOVED">%1$s ne fait plus partie de la bibliothèque. Rien n\'y a été supprimé.</string>
     <string name="LIB_CHIP_NOT_PLAYABLE_YET">Pas encore jouable</string>
+    <!-- A Ready game's card when the app can prepare it (GameState.prepared) -->
+    <string name="LIB_CHIP_PREPARED">Préparé</string>
+    <string name="LIB_CHIP_OUTDATED">Préparé · pas à jour</string>
+    <string name="LIB_CHIP_NOT_PREPARED">Pas préparé</string>
     <string name="LIB_NOT_PLAYABLE_NOTE">Les jeux %1$s sont listés mais pas encore jouables : leur console arrive dans une prochaine version.</string>
     <string name="LIB_TRUNCATED">Trop de fichiers : l\'analyse d\'un dossier s\'est arrêtée à 5 000 entrées</string>
     <string name="LIB_SCANNING">Analyse des dossiers de la bibliothèque… %1$d trouvés</string>
@@ -91,6 +95,7 @@
     <string name="ROM_NEW_CODE">Préparé · %1$d nouvelles adresses trouvées · à préparer à nouveau</string>
     <string name="ROM_NOT_PREPARED_NOTE">Jouer lance le jeu tout de suite, dans l\'interpréteur. Préparer le traduit pour cet appareil (quelques minutes) pour qu\'il tourne en natif ; vous pouvez jouer pendant ce temps.</string>
     <string name="ROM_PREPARED_NOTE">Le jeu tourne depuis sa préparation. Le code qu\'elle ne couvre pas passe encore par l\'interpréteur et est noté pour la prochaine préparation.</string>
+    <string name="ROM_OLDER_TOOLKIT_NOTE">Cette mise à jour traduit mieux les jeux. Préparer à nouveau pour en profiter ; d\'ici là, le jeu se lance comme avant. Vos sauvegardes sont gardées.</string>
     <string name="ROM_NEW_CODE_NOTE">Vos dernières parties ont exécuté du code que la préparation avait manqué (%1$d adresses). Préparez à nouveau pour le traduire aussi ; Jouer fonctionne en attendant.</string>
     <string name="ROM_FAILED_NOTE">La préparation a échoué (%1$s) ; le jeu se joue toujours dans l\'interpréteur. Voir l\'erreur pour le journal.</string>
     <string name="ROM_PREPARED_DONE">%1$s est préparé : il tourne maintenant en natif.</string>

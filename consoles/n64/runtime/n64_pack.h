@@ -74,7 +74,8 @@ void n64_pack_close(n64_pack *p);
 int n64_pack_load(n64_machine *m, const char *pack_lib, const char *key, const char *source_sha256, n64_pack *out);
 
 /* n64_recomp_write_missed(m) into path, its directory made first. Logs "n64: code at <N> address(es) the pack did not
- * cover, <A> new record(s), in <path>" when there were any. Returns the number of records added, or -1. */
+ * cover, <A> new record(s), in <path>" when it added any (it is called at every pause and every few minutes). Returns
+ * the number of records added, or -1. */
 int n64_pack_save_missed(n64_machine *m, const char *path);
 
 #ifdef __cplusplus

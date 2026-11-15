@@ -20,9 +20,9 @@
     <string name="MENU_LANGUAGE_FOLLOW">Comme les Réglages</string>
     <string name="MENU_WIDESCREEN">Écran large</string>
     <string name="MENU_VIDEO_FOLLOW">Comme les Réglages</string>
-    <string name="MENU_SCALE">Échelle (au prochain lancement)</string>
-    <string name="MENU_FILTER">Filtre (au prochain lancement)</string>
-    <string name="MENU_UPSCALE">Résolution (au prochain lancement)</string>
+    <string name="MENU_SCALE">Échelle</string>
+    <string name="MENU_FILTER">Filtre</string>
+    <string name="MENU_UPSCALE">Résolution</string>
     <string name="MENU_BACK">Retour</string>
     <string name="MENU_HINT_SELECT">Choisir</string>
     <string name="MENU_HINT_BACK">Retour</string>
@@ -58,5 +58,9 @@
     <string name="MENU_STATE_RESUME_FAILED">Reprise impossible : le jeu repart du début</string>
     <string name="MENU_RESUME_AUTO">Reprendre là où je m\'étais arrêté</string>
     <string name="MENU_QUIT_CONFIRM_KEPT">Votre progression est gardée pour la prochaine fois</string>
-    <string name="MENU_SHADER">Shader d\'image (au prochain lancement)</string>
+    <string name="MENU_RESTART_APPLY">Redémarrer pour appliquer</string>
+    <string name="MENU_RESTART_APPLY_SUB">Des changements l\'attendent</string>
+    <string name="MENU_RESTART_CONFIRM">Confirmer : redémarrer</string>
+    <string name="MENU_RESTART_KEPT">Le jeu reprend là où vous en êtes</string>
+    <string name="MENU_SHADER">Shader d\'image</string>
 </resources>

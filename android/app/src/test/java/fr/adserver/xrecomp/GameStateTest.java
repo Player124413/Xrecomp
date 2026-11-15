@@ -116,6 +116,68 @@ public class GameStateTest {
         assertEquals(GameState.Chip.NO_FILE_ACCESS, GameState.chip(f));
     }
 
+    /**
+     * How prepared a Ready game is (its card's label): Prepared, Prepared · out of date (a pack from an older
+     * toolkit), Not prepared for a console game without a pack (it plays in the interpreter); nothing without the
+     * toolchain or when another chip applies (it keeps its priority).
+     */
+    @Test
+    public void preparedStates() {
+        // Xbox: a Ready title with the toolchain has a valid pack, current or from an older toolkit.
+        GameState.Facts f = ready();
+        assertEquals(GameState.Prepared.PREPARED, GameState.prepared(f, GameState.chip(f)));
+        f.packOlderToolkit = true;
+        assertEquals(GameState.Chip.READY, GameState.chip(f));   // it still plays
+        assertEquals(GameState.Prepared.OUTDATED, GameState.prepared(f, GameState.chip(f)));
+        f.toolchain = false;   // the shell runs it its own way: a plain « Ready »
+        assertEquals(GameState.Chip.READY, GameState.chip(f));
+        assertEquals(GameState.Prepared.NONE, GameState.prepared(f, GameState.chip(f)));
+        f.toolchain = true;
+        f.pack = Pack.Check.NO_PACK;   // NEEDS_PREPARING keeps its meaning
+        assertEquals(GameState.Chip.NEEDS_PREPARING, GameState.chip(f));
+        assertEquals(GameState.Prepared.NONE, GameState.prepared(f, GameState.chip(f)));
+        f.pack = Pack.Check.VALID;
+        f.runningTid = TID;
+        assertEquals(GameState.Prepared.NONE, GameState.prepared(f, GameState.chip(f)));
+
+        for (Console c : new Console[] {Console.GBA, Console.PS1, Console.N64}) {
+            GameState.Facts g = new GameState.Facts();
+            g.console = c;
+            g.titleId = c.id + "-KEY-00000001";
+            g.source = GameState.Source.PRESENT;
+            g.toolchain = true;
+            g.pack = Pack.Check.NO_PACK;
+            assertEquals(c.name(), GameState.Chip.READY, GameState.chip(g));
+            assertEquals(c.name(), GameState.Prepared.NOT_PREPARED, GameState.prepared(g, GameState.chip(g)));
+            g.pack = Pack.Check.LIB_SIZE;   // a broken pack: it plays in the interpreter
+            assertEquals(c.name(), GameState.Prepared.NOT_PREPARED, GameState.prepared(g, GameState.chip(g)));
+            g.pack = Pack.Check.VALID;
+            assertEquals(c.name(), GameState.Prepared.PREPARED, GameState.prepared(g, GameState.chip(g)));
+            g.packOlderToolkit = true;
+            assertEquals(c.name(), GameState.Chip.READY, GameState.chip(g));
+            assertEquals(c.name(), GameState.Prepared.OUTDATED, GameState.prepared(g, GameState.chip(g)));
+            // Running, Preparing, Queued, No file access keep their priority.
+            g.runningTid = g.titleId;
+            assertEquals(c.name(), GameState.Prepared.NONE, GameState.prepared(g, GameState.chip(g)));
+            g.runningTid = null;
+            PrepareProtocol.Status s = new PrepareProtocol.Status();
+            s.state = PrepareProtocol.RUNNING;
+            g.prepare = s;
+            g.prepareFresh = true;
+            assertEquals(c.name(), GameState.Chip.PREPARING, GameState.chip(g));
+            assertEquals(c.name(), GameState.Prepared.NONE, GameState.prepared(g, GameState.chip(g)));
+            s.state = PrepareProtocol.QUEUED;
+            g.prepareProcess = true;
+            assertEquals(c.name(), GameState.Prepared.NONE, GameState.prepared(g, GameState.chip(g)));
+            g.prepare = null;
+            g.source = GameState.Source.NO_ACCESS;
+            assertEquals(c.name(), GameState.Prepared.NONE, GameState.prepared(g, GameState.chip(g)));
+            g.source = GameState.Source.PRESENT;
+            g.toolchain = false;   // no Prepare in this APK: a plain « Ready »
+            assertEquals(c.name(), GameState.Prepared.NONE, GameState.prepared(g, GameState.chip(g)));
+        }
+    }
+
     @Test
     public void runningBeatsEverything() {
         GameState.Facts f = ready();

@@ -55,9 +55,19 @@ arguments (segment tables, compressed code) are found by the discovery loop.
    goes further, at the next start, at a reserved encoding, or after a call that does not return (call, slot,
    padding to an aligned address, or a stack frame setup right after the slot);
 4. a linear sweep: compiler output is contiguous, so the gaps left inside the text the walk reached are swept (each
-   run of valid code after padding is a function, explored in turn); after the last function reached, the sweep
-   goes on only while candidates look like functions (plausible start, valid instructions, a return), so rodata is
-   not taken for code. Code that follows a function jumping through a table we could not read (a JR through a
+   run of valid code after padding is a function, explored in turn); after the last function reached, and over a gap
+   of more than 64 KB between two functions reached, the sweep goes on only while candidates look like functions
+   (plausible start, valid instructions, a return), so rodata and data are not taken for code. A function (but a
+   seed) whose body holds an instruction compilers do not emit (LL / SC, immediate traps, COP0 other than the moves,
+   TLB operations and ERET, a write to r0) is data: neither lifted nor explored. Ocarina of Time (PAL 1.1) shows why:
+   its boot JALs into the `code` overlay's run-time addresses, which hold audio data in the boot megabyte; before
+   2026-11-15 that pulled 24,400 junk functions (223,148 instructions, a 5-minute lift) into the pack, each one a
+   content check at run time; now 146 functions, 6,092 instructions, a second.
+   In recorded code (no sweep), a recorded address inside the function an earlier one starts (a return point, a
+   branch target: the runtime records where the interpreter had to start) is not a start of its own: the function's
+   entry switch resumes there, rather than pieces each left through the dispatcher.
+   A branch to itself over a NOP (an idle loop) gets `RC_IDLE`: the turns its event check would let run go by at
+   once, as the interpreter's blocks fast-forward them. Code that follows a function jumping through a table we could not read (a JR through a
    computed register), right after one of its internal branches, continues that function (its switch cases);
 5. bodies longer than 1000 instructions are cut (compile time grows faster than linearly), and TLB-mapped ones at
    every 4 KB page (one translation per entry).

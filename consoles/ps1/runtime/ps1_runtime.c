@@ -707,6 +707,42 @@ static void cheat_poke32(void *m, uint32_t addr, uint32_t v)
     ps1_poke32(m, addr, v);
 }
 
+/* ---- Freeze diagnostic: a game stuck in a loop with interrupts off --------------------------------------------- */
+
+/* Nothing but that loop can get it out (no IRQ handler runs), so it is a hang in the core (a device that never gives
+ * the loop what it waits for), not a slow scene: said once in the log, with the interrupt controller's state, and
+ * again when the game leaves. Checked at each frame's end; host-side only (nothing in the machine changes). */
+#define STALL_FRAMES 300 /* 5 s at 60 Hz */
+
+typedef struct stall_watch {
+    uint32_t window; /* the 64-byte code window the PC stays in */
+    int frames;      /* consecutive frame ends in it with SR.IEc = 0 (0: not watching) */
+    int told;
+} stall_watch;
+
+static void stall_check(ps1_machine *m, stall_watch *w)
+{
+    uint32_t pc = ps1_pc(m), off = !(ps1_cop0(m, 12) & 1); /* SR bit 0: IEc */
+    if (off && w->frames && (pc & ~63u) == w->window) {
+        if (w->frames < STALL_FRAMES && ++w->frames == STALL_FRAMES) {
+            uint32_t st, mask;
+            ps1_irq_regs(m, &st, &mask);
+            printf("ps1: the game has not left pc 0x%08x for 5 s with interrupts off (I_STAT %x, I_MASK %x)\n", pc,
+                   (unsigned)st, (unsigned)mask);
+            fflush(stdout);
+            w->told = 1;
+        }
+        return;
+    }
+    if (w->told) {
+        printf("ps1: running again\n");
+        fflush(stdout);
+        w->told = 0;
+    }
+    w->window = pc & ~63u;
+    w->frames = off ? 1 : 0;
+}
+
 /* ---- The run -------------------------------------------------------------------------------------------------- */
 
 static uint64_t now_ns(void)
@@ -788,8 +824,7 @@ static void pads_read(int port, int players, int analog, pad_in *out)
         uint32_t pressed = 0, swallow = 0;
         out->hk_held |= recomp_hotkeys_pad_update(recomp_hotkeys_get(), &s_hk_pad[p], src, &pressed, &swallow);
         out->hk_pressed |= pressed;
-        if (swallow) /* a held chord's buttons reach the game as nothing */
-            o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
+        console_pad_swallow(&s_pad_map, &o, swallow); /* a held chord's buttons: not the on-screen pad's */
         const uint32_t chord = HOST_PAD_BACK | HOST_PAD_LSTICK | HOST_PAD_RSTICK;
         if ((o.host_buttons & chord) == chord)
             out->toggle = 1;
@@ -1060,6 +1095,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
     recomp_hotkeys_state hk_keys = {0};
     recomp_ff_carry carry = {{0, 0}, 0};
     disc_swap swap = {"", 0};
+    stall_watch stall = {0, 0, 0};
     ps1_gpu *gpu = ps1_get_gpu(m);
     /* DualShocks (XBA-167): plugged in in the mode chosen (RECOMP_PS1_PAD); the game may switch them (config mode)
      * and the toggle chord is their ANALOG button. The left stick is a D-pad while a port reports digital. */
@@ -1176,6 +1212,7 @@ int ps1_runtime_run(const ps1_runtime_opts *o)
             uint64_t c0 = ps1_cycles(m);
             ps1_run_frame(m);
             frame_ns = ps1_runtime_frame_ns(ps1_cycles(m) - c0);
+            stall_check(m, &stall);
             if (cheats.n)
                 recomp_cheats_apply(&cheats, &cheat_bus);
             recomp_rewinder_frame(&rw, rewind_size, rewind_save, m);

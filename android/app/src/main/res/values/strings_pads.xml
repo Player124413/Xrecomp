@@ -45,4 +45,13 @@
     <string name="TE_RESET">Reset</string>
     <string name="TE_CANCEL">Cancel</string>
     <string name="TE_SAVE">Save</string>
+    <!-- XBA-212: touch robustness. -->
+    <string name="TE_BANNER">Editing touch layout</string>
+    <string name="TE_UNPLAYABLE">Not saved: keep a D-pad or stick and at least one face button visible.</string>
+    <string name="CTL_TOUCH_RESET">Reset touch layouts</string>
+    <string name="CTL_TOUCH_RESET_DETAIL">Removes every saved on-screen pad layout, for all consoles and every game: the usual layout comes back.</string>
+    <string name="CTL_TOUCH_RESET_DONE">Touch layouts reset (%1$d removed).</string>
+    <string name="TOUCH_HINT_CONTROLLER">Touch pad hidden: a controller is connected. Tap the game screen to show it, or see Settings › Controls › On-screen pad › Show.</string>
+    <string name="TOUCH_HINT_PANEL">Touch pad hidden while the bottom screen shows the panel. Tap the game screen to show it.</string>
+    <string name="TOUCH_NATIVE_FAILED">The on-screen pad cannot reach the game (native call missing). Share the log from the in-game menu.</string>
 </resources>

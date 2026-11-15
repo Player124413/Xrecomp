@@ -2611,6 +2611,12 @@ void n64_rdp_set_thread_hook(n64_rdp_thread_hook fn, void *user)
     s_thread_hook_user = user;
 }
 
+void n64_rdp_get_thread_hook(n64_rdp_thread_hook *fn, void **user)
+{
+    *fn = s_thread_hook;
+    *user = s_thread_hook_user;
+}
+
 #ifdef RDP_THREADS
 typedef struct {
     n64_rdp *d;

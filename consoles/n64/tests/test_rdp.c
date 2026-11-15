@@ -956,6 +956,33 @@ static uint32_t busy_hash(int threads)
     return h;
 }
 
+/* The Vulkan RDP: paraLLEl-RDP's own threads (command ring, fence executor, pipeline compiles; RDP::set_thread_hook)
+ * call the same hook, each start heard again as an end once the RDP is gone. */
+static void t_vk_thread_hook(void)
+{
+    if (!vk)
+        return;
+    static int one = 1;
+    if (G.dp)
+        rig_close(&G); /* threads that kept an earlier test's hook end before the count */
+    G.dp = NULL;
+    atomic_store(&hook_up, 0);
+    atomic_store(&hook_down, 0);
+    n64_rdp_set_thread_hook(count_hook, &one);
+    fresh("vulkan thread hook");
+    if (!vk) { /* it fell back to the software RDP this time */
+        n64_rdp_set_thread_hook(NULL, NULL);
+        return;
+    }
+    rig_close(&G);
+    G.dp = NULL;
+    n64_rdp_set_thread_hook(NULL, NULL);
+    const int up = atomic_load(&hook_up), down = atomic_load(&hook_down);
+    check(up >= 3, "thread hook: paraLLEl-RDP's threads start through it");
+    expect("thread hook: as many ends as starts", (uint32_t)down, (uint32_t)up);
+    fresh("after the thread hook");
+}
+
 static void t_scenes(void)
 {
     uint32_t h1 = busy_hash(1);
@@ -1292,7 +1319,7 @@ static void t_wrote(void)
             rdp_rig g;
             g.ram = calloc(RAM_SIZE, 1);
             g.irqs = 0;
-            g.dp = n64_rdp_create((n64_rcp_bus){ g.ram, RAM_SIZE, rig_raise, rig_clear, &w, wrote_cb });
+            g.dp = n64_rdp_create((n64_rcp_bus){ g.ram, RAM_SIZE, rig_raise, rig_clear, &w, wrote_cb, NULL });
             if (threads > 1)
                 n64_rdp_set_threads(g.dp, threads);
             mx_s = 0x9E3779B9u * (uint32_t)(i + 1);
@@ -1325,6 +1352,111 @@ static void t_wrote(void)
     check(w.calls && w.bytes / (uint64_t)w.calls < 0x100000, "ranges close to the images drawn");
     free(before);
     free(w.mark);
+}
+
+/* ---- Deferred DP interrupt (n64_devices.h bus.defer_dp, n64_rdp.h n64_rdp_dp_complete) ----------------------------- */
+typedef struct {
+    int irqs, answer, asked;
+    wrote_log w;
+} defer_ctx;
+static void defer_raise(void *ctx, int irq)
+{
+    if (irq == N64_MI_DP)
+        ((defer_ctx *)ctx)->irqs++;
+}
+static void defer_wrote(void *ctx, uint32_t addr, uint32_t len) { wrote_cb(&((defer_ctx *)ctx)->w, addr, len); }
+static int defer_ask(void *ctx)
+{
+    defer_ctx *c = ctx;
+    c->asked++;
+    return c->answer;
+}
+static void defer_run(n64_rdp *dp, uint8_t *ram, const rdp_list *l)
+{
+    for (int i = 0; i < l->n; i++) {
+        n64_wbe32(ram + CMD_BASE + i * 8, (uint32_t)(l->w[i] >> 32));
+        n64_wbe32(ram + CMD_BASE + i * 8 + 4, (uint32_t)l->w[i]);
+    }
+    n64_rdp_write_reg(dp, 0, CMD_BASE);
+    n64_rdp_write_reg(dp, 1, CMD_BASE + (uint32_t)l->n * 8);
+    n64_rdp_run(dp);
+}
+
+/* A SYNC_FULL the bus defers: no interrupt (the Vulkan RDP keeps its busy bits and its rows count as unreported) until
+ * n64_rdp_dp_complete; a flush puts the pixels in RDRAM without the interrupt; a second SYNC_FULL completes the first;
+ * a bus that answers 0 gets it at once. The software RDP runs the same through n64_rdp_set_defer_software. */
+static void t_defer(void)
+{
+    cur = "deferred DP interrupt";
+    n64_rdp_set_defer_software(1);
+    defer_ctx c;
+    memset(&c, 0, sizeof c);
+    c.w.mark = calloc(RAM_SIZE, 1);
+    c.w.self = pthread_self();
+    uint8_t *ram = calloc(RAM_SIZE, 1);
+    n64_rdp *dp = n64_rdp_create((n64_rcp_bus){ ram, RAM_SIZE, defer_raise, NULL, &c, defer_wrote, defer_ask });
+    n64_rdp_set_defer_software(0);
+    const int v = !strcmp(n64_rdp_backend_name(dp), "vulkan");
+    const uint32_t fb_end = FB_ADDR + 320 * 240 * 2;
+    rdp_list l;
+    l.n = 0;
+    L(&l, c_color_image(F_RGBA, SZ16, 320, FB_ADDR));
+    L(&l, c_scissor(0, 0, 320 * 4, 240 * 4));
+    L(&l, c_modes(OM_FILL));
+    L(&l, c_fill_color(0xF801F801));
+    L(&l, c_fill_rect(0, 10 * 4, 319 * 4, 19 * 4));
+    L(&l, c_sync_full());
+    c.answer = 1;
+    defer_run(dp, ram, &l);
+    expect("asked once", (uint32_t)c.asked, 1);
+    expect("no DP interrupt while deferred", (uint32_t)c.irqs, 0);
+    if (v) {
+        check((n64_rdp_read_reg(dp, 3) & 0x020) != 0, "pipe busy until it completes");
+        check(n64_rdp_unreported(dp, FB_ADDR, fb_end) == 1, "its rows not reported yet");
+    }
+    n64_rdp_flush(dp);
+    expect("flushed: px16(5,12)", n64_be16(ram + FB_ADDR + (12 * 320 + 5) * 2), 0xF801);
+    expect("a flush raises nothing", (uint32_t)c.irqs, 0);
+    check(n64_rdp_unreported(dp, FB_ADDR, fb_end) == 0, "flushed: reported");
+    check(c.w.mark[FB_ADDR + 12 * 640 + 10] == 1, "its rows went through bus.wrote");
+    n64_rdp_dp_complete(dp);
+    expect("completed: the DP interrupt", (uint32_t)c.irqs, 1);
+    if (v)
+        check((n64_rdp_read_reg(dp, 3) & 0x020) == 0, "completed: pipe idle");
+    n64_rdp_dp_complete(dp);
+    expect("nothing pending: nothing more", (uint32_t)c.irqs, 1);
+
+    /* Completed without a flush: the wait is dp_complete's. */
+    l.n = 0; /* green */
+    L(&l, c_fill_color(0x07C107C1));
+    L(&l, c_fill_rect(0, 30 * 4, 319 * 4, 39 * 4));
+    L(&l, c_sync_full());
+    defer_run(dp, ram, &l);
+    expect("deferred again", (uint32_t)c.irqs, 1);
+    n64_rdp_dp_complete(dp);
+    expect("completed", (uint32_t)c.irqs, 2);
+    expect("its pixels: px16(5,32)", n64_be16(ram + FB_ADDR + (32 * 320 + 5) * 2), 0x07C1);
+    check(c.w.mark[FB_ADDR + 32 * 640 + 10] == 1, "reported at completion");
+
+    /* A second SYNC_FULL before the first completed: the first completes then. */
+    l.n = 0;
+    L(&l, c_sync_full());
+    defer_run(dp, ram, &l);
+    defer_run(dp, ram, &l);
+    expect("the second SYNC_FULL completed the first", (uint32_t)c.irqs, 3);
+    n64_rdp_dp_complete(dp);
+    expect("then the second", (uint32_t)c.irqs, 4);
+    c.answer = 0;
+    defer_run(dp, ram, &l);
+    expect("a bus that answers 0: at once", (uint32_t)c.irqs, 5);
+    n64_rdp_stats st;
+    n64_rdp_get_stats(dp, &st);
+    expect("dp_completed", (uint32_t)st.dp_completed, 4);
+    c.answer = 1;
+    defer_run(dp, ram, &l); /* destroyed with one pending */
+    n64_rdp_destroy(dp);
+    free(ram);
+    free(c.w.mark);
 }
 
 /* The homebrew gfx.z64 frame as libdragon's rdpq emits it (fill and copy mode fix-ups included), with its checks. */
@@ -1398,6 +1530,67 @@ static void t_upscale(void)
         expect("red inside", px[(2 * (40 + 1) + 1) * 1280 + 4 * 50 + 2] & 0xF0F0F0, 0xF00000);
         expect("black outside", px[(2 * (100 + 1) + 1) * 1280 + 4 * 200 + 2], 0);
     }
+
+    /* The early scanout (n64_rdp_scanout_prefetch): the same picture as a scanout made at n64_display time; dropped
+     * when the RDP draws where it reads, when the registers differ, or forgotten. */
+    cur = "early scanout";
+    static uint32_t px2[1280 * 480];
+    const uint32_t lo = FB_ADDR, hi = FB_ADDR + 320 * 242 * 2;
+    n64_rdp_stats s0, s1;
+    n64_rdp_get_stats(G.dp, &s0);
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    check(n64_rdp_scanout(G.dp, vi, 0, px2, 1280, 480, &w, &h) == 0 && w == 1280 && h == 480, "prefetched scanout");
+    n64_rdp_get_stats(G.dp, &s1);
+    expect("taken", (uint32_t)(s1.prefetch_hits - s0.prefetch_hits), 1);
+    check(memcmp(px, px2, sizeof px) == 0, "the same pixels as the scanout at display time");
+
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    L(&LS, c_fill_color(0x07C107C1)); /* green, where the VI reads */
+    L(&LS, c_fill_rect(40 * 4, 30 * 4, 119 * 4, 69 * 4));
+    L(&LS, c_sync_full());
+    go();
+    check(n64_rdp_scanout(G.dp, vi, 0, px2, 1280, 480, &w, &h) == 0, "scanout after drawing");
+    expect("drawn after the prefetch: shown", px2[(2 * (40 + 1) + 1) * 1280 + 4 * 50 + 2] & 0xF0F0F0, 0x00F000);
+    n64_rdp_get_stats(G.dp, &s0);
+    expect("not taken", (uint32_t)(s0.prefetch_hits - s1.prefetch_hits), 0);
+
+    uint32_t vi2[14];
+    memcpy(vi2, vi, sizeof vi2);
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    vi2[11] = 0x000E0205; /* another V_BURST */
+    n64_rdp_scanout(G.dp, vi2, 0, px2, 1280, 480, &w, &h);
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    n64_rdp_scanout_forget(G.dp);
+    n64_rdp_scanout(G.dp, vi, 0, px2, 1280, 480, &w, &h);
+    n64_rdp_get_stats(G.dp, &s1);
+    expect("other registers, forgotten: not taken", (uint32_t)(s1.prefetch_hits - s0.prefetch_hits), 0);
+    expect("prefetches started", (uint32_t)(s1.prefetches - s0.prefetches), 2);
+
+    /* n64_rdp_scanout_rgba: the same picture as n64_rdp_scanout, RGBA bytes in the RDP's buffer, without a copy; the
+     * last one stays readable through the next scanout (two buffers), prefetched or not. */
+    cur = "scanout rgba";
+    const uint8_t *rgba = NULL, *rgba2 = NULL;
+    int pitch = 0, w2 = 0, h2 = 0, pitch2 = 0;
+    check(n64_rdp_scanout(G.dp, vi, 0, px, 1280, 480, &w, &h) == 0, "xrgb scanout");
+    check(n64_rdp_scanout_rgba(G.dp, vi, 0, &rgba, &w2, &h2, &pitch) == 0 && rgba, "rgba scanout");
+    expect("rgba size", (uint32_t)(w2 << 16 | h2), (uint32_t)(w << 16 | h));
+    expect("rgba pitch", (uint32_t)pitch, (uint32_t)w2 * 4);
+    int same = rgba && w2 == w && h2 == h;
+    for (int y = 0; same && y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const uint8_t *q = rgba + (size_t)y * (size_t)pitch + 4 * (size_t)x;
+            if (((uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2]) != px[(size_t)y * (size_t)w + x]) {
+                same = 0;
+                break;
+            }
+        }
+    check(same, "the same pixels as the XRGB scanout");
+    uint32_t first = rgba ? n64_be32(rgba + (size_t)(2 * (40 + 1) + 1) * (size_t)pitch + 4 * (4 * 50 + 2)) : 0;
+    n64_rdp_scanout_prefetch(G.dp, vi, 0, lo, hi);
+    check(n64_rdp_scanout_rgba(G.dp, vi, 0, &rgba2, &w2, &h2, &pitch2) == 0 && rgba2 && rgba2 != rgba,
+          "prefetched rgba scanout: the other buffer");
+    expect("the one before still readable", rgba ? n64_be32(rgba + (size_t)(2 * (40 + 1) + 1) * (size_t)pitch +
+                                                            4 * (4 * 50 + 2)) : 0, first);
 }
 
 static void t_gfx(void)
@@ -1636,8 +1829,10 @@ int main(int argc, char **argv)
     t_persp();
     t_lod();
     t_scenes();
+    t_vk_thread_hook();
     t_matrix();
     t_wrote();
+    t_defer();
     t_gfx();
     t_upscale();
     if (G.dp)

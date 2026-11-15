@@ -2,13 +2,17 @@
  * z64 / v64 / n64 byte orders, a trailing part included; our homebrew gfx.z64 when it is built), the pack.json
  * checks, the library's table, n64_pack_load's outcome for a valid / stale (another ROM, another key, another shell
  * ABI, another host, a damaged library, a table of another ABI or another ROM, no identity) / missing pack -- the
- * machine runs in every case -- and the discovered code the next Prepare reads (written once, no repeats).
+ * machine runs in every case -- and the discovered code the next Prepare reads (written once, no repeats). The
+ * dispatcher with a table of its own: one record per code at an address however it is reached (as a view
+ * into several earlier records), an entry whose code is not there does not cut the interpreter's blocks, pages no
+ * entry's code is in run as chained blocks, and both machines (table / none) stay in the same state.
  *
  *   n64_pack_test <fake_n64_pack.so> [HOMEBREW_DIR] */
 #define _GNU_SOURCE
 #include "n64_core.h"
 #include "n64_internal.h"
 #include "n64_pack.h"
+#include "n64_recomp.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -215,6 +219,174 @@ static n64_machine *machine(void)
     return m;
 }
 
+/* ---- the dispatcher with a table built here ---- */
+
+#define NOP 0u
+#define JR_RA 0x03E00008u
+#define J(t) (0x08000000u | (((t) >> 2) & 0x3FFFFFFu))
+#define JAL(t) (0x0C000000u | (((t) >> 2) & 0x3FFFFFFu))
+#define B_SELF 0x1000FFFFu /* beq zero, zero, . */
+#define ADDIU_T0 0x25080001u /* addiu t0, t0, 1 */
+
+static void never_called(n64_machine *m)
+{
+    (void)m;
+    failures++;
+    fprintf(stderr, "a lifted function that may not run ran\n");
+}
+
+static n64_machine *bare_machine(void)
+{
+    static uint8_t rom[ROM_SIZE];
+    make_rom(rom, sizeof rom);
+    char err[256] = "";
+    n64_machine *m = n64_create(rom, sizeof rom, NULL, err, sizeof err);
+    CHECK(m != NULL);
+    if (m) {
+        m->cpu.cop0[C0_STATUS] = 0x34000000u;
+        n64_cpu_status_changed(m);
+        m->cpu.pc = 0xFFFFFFFF80000400ull;
+        m->cpu.npc = m->cpu.pc + 4;
+    }
+    return m;
+}
+
+/* An entry over n words at addr as memory holds them now (hash ok) or not (spoilt). */
+static n64_recomp_entry entry_at(n64_machine *m, uint32_t addr, uint32_t n, int spoil)
+{
+    uint32_t w[64];
+    for (uint32_t i = 0; i < n; i++)
+        w[i] = n64_peek32(m, addr + 4 * i);
+    n64_recomp_entry e = {addr, 4 * n, n64_recomp_hash(w, n) ^ (spoil ? 1u : 0u), never_called};
+    return e;
+}
+
+static int count_lines(const char *path, const char *prefix, size_t *len)
+{
+    FILE *f = fopen(path, "r");
+    char line[8192];
+    int n = 0;
+    while (f && fgets(line, sizeof line, f))
+        if (!strncmp(line, prefix, strlen(prefix))) {
+            n++;
+            if (len)
+                *len = strcspn(line, "\n");
+        }
+    if (f)
+        fclose(f);
+    return n;
+}
+
+/* P (0x80001300) is reached three times, each time right after a new record of code around it (A0 / A1 / A2: one
+ * 2 KB window each, many records in between so none is a view into the one before): as a view into each, of three
+ * lengths, the same bytes. One record. */
+static void test_record_once(const char *root)
+{
+    n64_machine *m = bare_machine();
+    if (!m)
+        return;
+    const uint32_t A[3] = {0x80001000u, 0x80001100u, 0x80001200u}, P = 0x80001300u;
+    uint32_t pc = 0x80000400u, filler = 0x80010000u;
+    for (int round = 0; round < 3; round++) {
+        n64_poke32(m, A[round], JR_RA);
+        n64_poke32(m, A[round] + 4, NOP);
+        n64_poke32(m, pc, JAL(A[round]));
+        n64_poke32(m, pc + 4, NOP);
+        n64_poke32(m, pc + 8, JAL(P));
+        n64_poke32(m, pc + 12, NOP);
+        pc += 16;
+        for (int k = 0; k < 40; k++, filler += 0x800, pc += 8) { /* fresh records, 2 KB apart */
+            n64_poke32(m, filler, JR_RA);
+            n64_poke32(m, filler + 4, NOP);
+            n64_poke32(m, pc, JAL(filler));
+            n64_poke32(m, pc + 4, NOP);
+        }
+    }
+    n64_poke32(m, pc, B_SELF);
+    n64_poke32(m, pc + 4, NOP);
+    n64_poke32(m, P, JR_RA);
+    n64_poke32(m, P + 4, NOP);
+    /* an entry of A's page that never runs: that page is dispatched block by block (a record at each start) */
+    static n64_recomp_entry e[1];
+    e[0] = entry_at(m, 0x80001700u, 2, 0);
+    static const n64_recomp_table t = {N64_RECOMP_ABI, 1, e, "", 0x80000400u};
+    CHECK(n64_attach_recomp(m, &t) == 0);
+    n64_run_cycles(m, 400000);
+    CHECK(m->cpu.pc == (uint64_t)(int64_t)(int32_t)pc || m->cpu.pc == (uint64_t)(int64_t)(int32_t)(pc + 4));
+    char path[1300];
+    snprintf(path, sizeof path, "%s/record_once.txt", root);
+    CHECK(n64_recomp_write_missed(m, path) > 120);
+    size_t len = 0;
+    CHECK(count_lines(path, "80001300 ", &len) == 1);
+    CHECK(len == 8 + 1 + 16 + 1 + 16 * 8); /* a view: its first 16 words */
+    for (int round = 0; round < 3; round++) {
+        char pre[16];
+        snprintf(pre, sizeof pre, "%08X ", A[round]);
+        CHECK(count_lines(path, pre, &len) == 1 && len == 8 + 1 + 16 + 1 + 4096);
+    }
+    uint32_t addrs[8];
+    size_t total = n64_recomp_missed(m, addrs, 8);
+    int seen = 0; /* the boot PC, A0, the return point, P, ... in the order they were met */
+    for (int i = 0; i < 8; i++)
+        seen |= (addrs[i] == 0x80000400u) | (addrs[i] == A[0]) << 1 | (addrs[i] == P) << 2;
+    CHECK(total > 120 && seen == 7);
+    CHECK(n64_recomp_write_missed(m, path) == 0); /* saved again (a pause, then the exit): nothing new */
+    n64_destroy(m);
+}
+
+/* A loop of 12 instructions at base, run on a machine with a table and on one without. spoil: an entry whose code is
+ * not there starts inside the loop (it must not cut the block); with_valid: an entry elsewhere in the page whose code
+ * is there (else the page holds no entry's code: chained blocks). Returns the instructions per dispatcher block. */
+static double loop_run(uint32_t base, int spoil, int with_valid)
+{
+    n64_machine *m = bare_machine(), *ref = bare_machine();
+    if (!m || !ref)
+        return 0;
+    n64_machine *both[2] = {m, ref};
+    for (int k = 0; k < 2; k++) {
+        n64_machine *x = both[k];
+        n64_poke32(x, 0x80000400u, J(base));
+        n64_poke32(x, 0x80000404u, NOP);
+        for (int i = 0; i < 10; i++)
+            n64_poke32(x, base + 4 * i, ADDIU_T0);
+        n64_poke32(x, base + 40, J(base));
+        n64_poke32(x, base + 44, NOP);
+        x->cpu.pc = 0xFFFFFFFF80000400ull;
+        x->cpu.npc = x->cpu.pc + 4;
+    }
+    static n64_recomp_entry e[2];
+    uint32_t n = 0;
+    if (spoil)
+        e[n++] = entry_at(m, base + 16, 2, 1);
+    if (with_valid)
+        e[n++] = entry_at(m, base + 0x800, 2, 0);
+    static n64_recomp_table t;
+    t = (n64_recomp_table){N64_RECOMP_ABI, n, e, "", 0x80000400u};
+    CHECK(n64_attach_recomp(m, &t) == 0);
+    n64_run_cycles(m, 3000000);
+    n64_run_cycles(ref, 3000000);
+    char why[256] = "";
+    int diff = n64_recomp_compare(m, ref, why, sizeof why);
+    CHECK(diff == 0);
+    if (diff)
+        fprintf(stderr, "loop at %08X: %s\n", base, why);
+    n64_recomp_stats st;
+    n64_recomp_get_stats(m, &st);
+    n64_destroy(m);
+    n64_destroy(ref);
+    return st.blocks ? (double)st.interp_ram / (double)st.blocks : 0;
+}
+
+static void test_dispatch_blocks(void)
+{
+    double cut = loop_run(0x80003000u, 1, 1), chained = loop_run(0x80004000u, 0, 0), junk = loop_run(0x80005000u, 1, 0);
+    printf("n64_pack: instructions per dispatched block: %.1f (an entry not there inside the loop), %.1f (no entry "
+           "in the page), %.1f (only an entry not there)\n", cut, chained, junk);
+    CHECK(cut >= 11.0);     /* one block per turn: the spoilt entry does not cut it */
+    CHECK(chained >= 100.0); /* chained blocks: back to the dispatcher only at events */
+    CHECK(junk >= 100.0);    /* an entry whose code is not there leaves the page free */
+}
+
 int main(int argc, char **argv)
 {
     char root[] = "/tmp/n64_pack_testXXXXXX", dir[1200], lib[1300], why[512], json[1300];
@@ -230,6 +402,8 @@ int main(int argc, char **argv)
     CHECK(mkdtemp(root) != NULL);
     test_sha256();
     test_rom_identity(argc > 2 ? argv[2] : NULL);
+    test_record_once(root);
+    test_dispatch_blocks();
     CHECK(strlen(n64_pack_host_abi()) > 0 && strcmp(n64_pack_host_abi(), "unknown") != 0);
 
     setenv("FAKE_PACK_SRC_SHA", hex, 1);

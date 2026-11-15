@@ -1023,11 +1023,25 @@ void CommandBuffer::end_render_pass()
 	begin_compute();
 }
 
+// xboxrecomp-android patch (third_party/parallel-rdp/README.md): the stalls, counted for the N64 runtime's perf line.
+static std::atomic<uint64_t> stalled_compiles{0}, stalled_compile_ns{0};
+
+void get_stalled_compiles(uint64_t &count, uint64_t &ns)
+{
+	count = stalled_compiles.load(std::memory_order_relaxed);
+	ns = stalled_compile_ns.load(std::memory_order_relaxed);
+}
+
 static void log_compile_time(const char *tag, Hash hash,
                              int64_t time_ns, VkResult result,
                              CommandBuffer::CompileMode mode)
 {
 	bool stall = time_ns >= 5 * 1000 * 1000 && mode != CommandBuffer::CompileMode::AsyncThread;
+	if (stall)
+	{
+		stalled_compiles.fetch_add(1, std::memory_order_relaxed);
+		stalled_compile_ns.fetch_add(uint64_t(time_ns), std::memory_order_relaxed);
+	}
 #ifndef VULKAN_DEBUG
 	// If a compile takes more than 5 ms and it's not happening on an async thread,
 	// we consider it a stall.

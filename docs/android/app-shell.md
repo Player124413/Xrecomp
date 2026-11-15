@@ -744,7 +744,7 @@ last column says where it could be set per game before, its files now moved into
 and `filter_<KEY>` (as `pad_map_<KEY>`; `aspect` / `integer` / `stretch`, `nearest` / `linear`; empty or absent:
 follows Settings). Set from the game's Home › **Options** (a pill after Controls: « This game's picture », Scale and
 Picture filter, « As in Settings (<Settings' value>) » then each value) or from the in-game menu › Settings
-(**Scale** / **Filter**, « next start » in the row). Before the runtime starts, `ShellActivity.applyConsoleVideo`
+(**Scale** / **Filter**, shown at once: [Live picture](#live-picture-and-restart-to-apply)). Before the runtime starts, `ShellActivity.applyConsoleVideo`
 sets, for a GBA, PS1 or N64 game, `RECOMP_SCALE` and `RECOMP_FILTER` to the game's value, else to recomp.cfg's line,
 else unsets them (the runtime's default: aspect; GBA nearest, PS1 / N64 linear; `RECOMP_<CONSOLE>_SCALE` /
 `_FILTER` still win there), and `RECOMP_PRESENT_VSYNC`, `RECOMP_AUDIO_BUF_SAMPLES`, `RECOMP_RUMBLE` from recomp.cfg
@@ -754,7 +754,7 @@ RECOMP_SCALE=… RECOMP_FILTER=… …, game <KEY> ».
 **A PS1 or N64 game's own internal resolution** (XBA-184, `ConsoleVideo.Setting.UPSCALE`). The same way:
 `files/settings/upscale_<KEY>` (`1`, `2`, `4`, `8`; empty or absent: follows Settings), an **Internal resolution**
 row after Picture filter in the game's Options (« As in Settings (<Settings' value>) », Native, 2x, 4x, 8x (N64
-Vulkan)) and « Resolution (next start) » in the in-game menu › Settings; a GBA game has neither (its 240 x 160 picture
+Vulkan)) and « Resolution » in the in-game menu › Settings (after « Restart to apply »); a GBA game has neither (its 240 x 160 picture
 is drawn as it is). `ShellActivity` exports `RECOMP_UPSCALE` with the scale and filter: the game's value (PS1 / N64),
 else recomp.cfg's line, else unset; unset for an Xbox game. The PS1 caps 8 at 4 (`ps1_runtime_upscale`).
 
@@ -769,7 +769,7 @@ unsets `RECOMP_LSFG` for an Xbox game (its runtime reads recomp.cfg's line). On 
 driver, for now), has a **Vulkan driver** row after the picture: « As in Settings (<Settings' driver>) », **System**,
 then each installed driver; the description warns, in amber, when the driver the game would start with went wrong
 last time (« Not compatible with the N64 renderer … », crashed, could not be opened, not loaded). The in-game menu ›
-Settings has the same row, « Vulkan driver (next start) », with a short warning in the value (« … · Not compatible »).
+Settings has the same row, « Vulkan driver » (after « Restart to apply »), with a short warning in the value (« … · Not compatible »).
 Not in a game's own app. Details in [Vulkan drivers](#vulkan-drivers).
 
 **Game data of a console game.** The same Options screen lists the game's stored things (`Storage.items`), each
@@ -835,8 +835,8 @@ Enhancements, for an N64 game its Vulkan driver; **Reset to Settings** (also Y: 
 choice too; the value says how many of its own); for a console game, its stored things. Saved at once; a running game
 gets them at its next start.
 
-**In-game menu.** Settings › **Game settings**: the same option rows for the running game, saved for its next start
-(the page says so), and Reset to Settings. The Language, Widescreen, 480p, Scale, Filter, Resolution and Vulkan driver
+**In-game menu.** Settings › **Game settings**: the same option rows for the running game, saved at once; the picture
+options are shown at once, the others wait for « Restart to apply » (the page says so), and Reset to Settings. The Language, Widescreen, 480p, Scale, Filter, Resolution and Vulkan driver
 rows of Settings stay; they write the same file.
 
 **Xbox per-game controls.** An Xbox title's Controls has « Mapping for: All Xbox games / This game only » at the top,
@@ -982,6 +982,46 @@ changes, their file, which one a game gets; pure Java), `TouchEdit` (the editor'
 - Tests: `TouchLayoutTest` (the format both ways, normalisation across sizes, the game's file over the console's,
   hidden controls not hit, drag on the grid, pinch, − / +, reset), `TouchEditorTest` (drag and save, This game only,
   B cancels; screenshots `ui-touch-editor-<layout>-<en|fr>`, `ui-touch-editor-hint-<en|fr>`).
+
+### Touch robustness (XBA-212)
+
+« The touch controls don't work » (AYN Thor, 0.5.1) with no regression in the touch → native path: every way the pad
+can look broken is closed.
+
+- **The in-game editor never passes for the game**: an opaque banner centred at the top (« Editing touch layout »,
+  Cancel, Save) and a dark tint (`TouchEditor.GAME_TINT`) over the held game. It is cancelled (the old layout kept)
+  when the game goes to the background (`onStop`), at each start (never restored), on `onResume`, when the in-game
+  menu opens (the panel's Menu button) and on Back / B. A layout with no D-pad / stick or no face button left to press
+  is not saved (the editor says so).
+- **Saved layouts are repaired at load** (`TouchLayout.repair`): entries of controls the layout has not are dropped; a
+  size that is NaN / zero / negative goes back to 100 %; a place off the screen, on an edge, NaN or with its centre in
+  the menu's swipe strip goes back to the default place. A layout that still leaves no reachable direction control or
+  face button (hidden, or stacked under another control: `TouchPad.playable`) is set aside for the console's defaults
+  (`shell: touch layout <LAYOUT> set aside for the defaults: ...`). Settings › Controls › **Reset touch layouts**
+  removes every saved layout (all consoles, every game's own).
+- **Hotkey chords never mask the touch buttons**: the GBA / PS1 / N64 runtimes hide a held chord's buttons with
+  `console_pad_swallow`, from the physical pad's part only; the overlay's targets (`ConsolePadOut.overlay_buttons`)
+  always reach the game.
+- **Auto on the Thor**: its built-in controls count as a controller, so Auto hides the pad (and the companion panel
+  hides it on the top screen). A tap on the game's screen (outside the menu's swipe strip, menu closed) reveals it;
+  that first tap sends nothing; it hides again after 10 s without a touch (`TouchControls.REVEAL_MS`) or when a
+  physical button is pressed (or a stick / trigger pushed half way). Hidden that way, a hint once per game process
+  (logcat and toast: « Touch pad hidden: ... »).
+- A failed native overlay call is logged (PR #159) and said once in a toast.
+- Tests: `TouchRobustTest` (editor auto-close and banner, repair / fallback, the editor refusing an unplayable layout,
+  reset, a physical chord with a touch button held, reveal on tap, the panel), `tests/console_pad` (`test_swallow`).
+
+### Device check (touch robustness, XBA-212), for Alex
+
+1. Thor, Show *Without a controller*, Bottom screen Panel: start a game; a toast says the touch pad is hidden. Tap the
+   middle of the top screen: the pad appears and the game got no button. Play with it; leave it 10 s untouched: it
+   goes. Tap again, then press a physical button: it goes.
+2. In-game menu › Settings › Edit touch layout: the banner « Editing touch layout » is at the top and the game is dark
+   behind it. Press Home, come back: the editor is gone, the pad plays. Open it again, press B: gone.
+3. Edit touch layout, hide the D-pad and both sticks, Save: refused with a message.
+4. Settings › Controls › Reset touch layouts: « Touch layouts reset (N removed) »; games show the usual layout.
+5. A PS1 / GBA game, Show *Always*: hold the touch Select while holding Select + right trigger (fast-forward) on
+   the Thor's pad: the game still sees Select pressed (before: it was hidden while the chord was held).
 
 ### Device check (touch layout editor, XBA-207), for Alex
 
@@ -1286,7 +1326,7 @@ that a driver that does not work falls back to the device's driver, then the sof
 driver's last start went wrong, the description says how (below). A opens the Drivers screen.
 
 **A game's own driver** (per game, N64 games only for now): its Home › Options › **Vulkan driver** and the in-game
-menu › Settings › **Vulkan driver (next start)** cycle through « As in Settings (<the default's name>) » (the
+menu › Settings › **Vulkan driver** cycle through « As in Settings (<the default's name>) » (the
 default), **System** (the device's driver whatever Settings says), and each installed driver. Saved at once in
 `files/settings/vk_driver_<KEY>` (the library key upper case, as `n64_pak_<KEY>`: a driver id, `system`, or
 empty / absent to follow Settings); it applies at the game's next start. The warning shown is the one of the driver
@@ -1433,7 +1473,7 @@ screenshot `console-options-2-n64-vkdriver.png`), `GameMenuTest.n64GameVulkanDri
    compatible with the N64 renderer », the Drivers screen shows R8 « Not compatible »;
    `adb exec-out run-as fr.adserver.xrecomp.shell cat files/vk_drivers/e634db0f929e2205.status` → `unsupported`.
    Another N64 game (following Settings) starts on T30 (`custom f65b2d3353fd4aa7`), and the first game's warning stays.
-9. In-game menu › Settings of an N64 game: « Vulkan driver (next start) » cycles the same choices.
+9. In-game menu › Settings of an N64 game: « Vulkan driver » cycles the same choices.
 10. Delete R8 (X, X): the first game's Options row is « As in Settings » again.
 11. Download names in the list have no `.zip` / `.adpkg` (« turnip_mrpurple_T29-toasted »).
 
@@ -1686,8 +1726,9 @@ A library with Xbox and GBA (or PS1 / N64) games, more than five in all, a few o
 7. Play a GBA game 2-3 minutes, Back to launcher (the game waits) for a few minutes, then go back and Quit: its Home
    says « Just now · 3 min played » (the minutes in the background are not counted); it is first in « Recently
    played ». The same with an Xbox game.
-8. In a game, open the menu › **Settings**: the row « Picture shader (next start) »; choose CRT, quit and start the
-   game again: the CRT shader is on (logcat `RECOMP_SHADER`); « As in Settings » puts Settings' shader back.
+8. In a game, open the menu › **Settings**: the row « Picture shader »; choose CRT: the CRT shader is on at once
+   (logcat `picture applied live`), and still on after the game starts again; « As in Settings » puts Settings'
+   shader back.
 9. French: every new label (Rechercher, Tri : Nom, Joués récemment, Tous les jeux, Favori, Tous) is in French.
 
 ### Other consoles (XBA-178)
@@ -2231,6 +2272,11 @@ game's files present **Prepare failed**, **Pack invalid** (the pack was built fr
 **Not imported**, **Needs copying**, **No file access** (per folder: a path without All files access, a tree whose
 permission is gone), else **Source gone** (an in-place folder that vanished) or
 **Game data missing**. A game with neither files nor source leaves the grid (its pack and saves stay in Storage).
+With the on-device toolchain a **Ready** card says how prepared the game is (`GameState.prepared`): **Prepared** (green
+dot), **Prepared · out of date** (amber: its pack.json `toolkit_sha256` is not this APK's toolkit digest —
+`PackFreshness` OLDER_TOOLKIT, as Home's « Prepared by an older version of the app »; it still plays), or, for a
+GBA / PS1 / N64 game without a valid pack, **Not prepared** (neutral grey: it plays in the interpreter). « New code
+found » stays on Home only (most played games have some). Without the toolchain a Ready card shows no chip.
 Variants: images with the same title ID are one game; the active one is the record's source, else the most recently
 modified.
 
@@ -2849,8 +2895,8 @@ less the display cutout, so 720p and 1080p look the same.
 | Fast-forward | Same condition: On / Off, a setting row (A or left / right toggles it, the menu stays open). On, the game runs faster until it is turned off. The pad chord **Back + RT, held** does the same while held by default ([Hotkeys](#hotkeys); Controls lists it for a GBA, PS1 or N64 game). |
 | Cheats | A GBA, PS1 or N64 game (XBA-197): the game's cheat codes, each On / Off, Add a code (a keyboard dialog), Delete a code (A twice); a change takes effect at once ([Cheats](#cheats)). |
 | Quick save / load (pad chords) | Same condition, without opening the menu: by default **Back + RB** saves and **Back + LB** loads the quick slot, the last slot saved or loaded (at the start, the most recently saved, else slot 1); the player's [hotkeys](#hotkeys) may move them and add next / previous quick slot. The runtime reads the chords itself; the menu polls `MenuNative.nativeStateEvent` every 250 ms while the game shows and says « Saved to slot N », « Slot N loaded », « Quick slot: N » or the error at the top of the screen. Controls lists the hotkeys. |
-| Resume where I left off | Same condition: Settings › « Resume where I left off », On by default (`files/settings/auto_resume`). On, the menu saves the **automatic slot** (`auto.st`, slot 0) when the player leaves the game: Quit (its confirmation then says « Your place is kept for next time »), Back to launcher, Home or the screen off (`GameMenu.onStop`). At the next start `ShellActivity` sets `RECOMP_STATE_RESUME=1` and the runtime loads it before the first frame; the menu says « Resumed where you left off » (or that it could not, and the game starts from the beginning). Load state lists it first as « Where you left off » when there is one; Save state never offers it. |
-| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale (next start)** and **Filter (next start)** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)). Every game with a title ID (Xbox too, XBA-203) has **Picture shader (next start)** (XBA-206): As in Settings (its value), None, Sharp, Scanlines, CRT, LCD, this game's own `RECOMP_SHADER` in its [Settings per game](#settings-per-game) file, the same value as the Game settings page's row (the runtime reads it once at start: `present_shader_env`). Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
+| Resume where I left off | Same condition: Settings › « Resume where I left off », On by default (`files/settings/auto_resume`). On, the menu saves the **automatic slot** (`auto.st`, slot 0) when the player leaves the game: Quit (its confirmation then says « Your place is kept for next time »), Back to launcher, Home or the screen off (`GameMenu.onStop`). At the next start `ShellActivity` sets `RECOMP_STATE_RESUME=1` and the runtime loads it before the first frame; the menu says « Resumed where you left off » (or that it could not, and the game starts from the beginning). Load state lists it first as « Where you left off » when there is one; Save state never offers it. The game's Home then shows **Resume** (that point) first and **Start** beside it: Start launches once from the console's boot (`files/settings/fresh_start`, deleted by the game process as it reads it, so Restart and the next launch resume again); without a saved point the Home shows Play. |
+| Settings | **Perf overlay** On / Off: fps and frame time (`xbox_FramebufferWindowGetStats`, twice a second) in the top right corner, in the menu's layer, not in the game frame; stays with the menu closed. **Volume** 0–100 % in steps of 10, A mutes / unmutes: one gain on the mixed APU output (`apu_volume.c`, the square of the fraction, after the WAV capture), set through JNI. **Bottom screen** Panel / Black / Off (only with a second screen): `GameStore.setBottomScreen` and the companion is refreshed at once. **On-screen pad** Shown / Hidden (only when the game has one, XBA-158): for this session, whatever Controls › On-screen pad › Show says (never with the companion panel up). These apply **now** (the rows say so) and are remembered (`files/settings/perf_overlay`, `game_volume`, `bottom_screen`); the volume is applied again at the next start. **Language** (only for an Xbox game whose XBE gives a title ID): As in Settings, then the nine languages; this game's own [language](#game-language), applied at the next start. **Widescreen** and **480p** (same condition, XBA-134): As in Settings / On / Off, this game's own console video setting (`GameVideo.java`, kept in `files/settings/widescreen_<TITLEID>` and `480p_<TITLEID>`), applied at the next start: `ShellActivity` sets `RECOMP_WIDESCREEN` / `RECOMP_480P` to `1` or `0` (the environment wins over the `recomp.cfg` line of Settings › Graphics) and unsets them when the game follows Settings; logcat « shell: title video RECOMP_WIDESCREEN=… RECOMP_480P=…, title … ». A GBA, PS1 or N64 game (XBA-181) has none of these three: **Scale** and **Filter** instead, As in Settings then each value, this game's own ([Settings per console](#settings-per-console)), shown at once. Every game with a title ID (Xbox too, XBA-203) has **Picture shader** (XBA-206): As in Settings (its value), None, Sharp, Scanlines, CRT, LCD, this game's own `RECOMP_SHADER` in its [Settings per game](#settings-per-game) file, the same value as the Game settings page's row, shown at once. Language, Widescreen, 480p, Resolution and Vulkan driver are read at the start: **Restart to apply** shows at the top of the page once one differs from what the game started with ([Live picture and Restart to apply](#live-picture-and-restart-to-apply)). Perf overlay, Volume and Screenshot are the same rows (the native side backs them for the consoles through the same JNI calls). An Xbox game's screen filter and scaling are not offered: the SDL window's are fixed at start (`fb_present_sdl.c`: nearest, logical size 640 x 480). |
 | Controls | The usual mapping, compact (plus Back and the menu chord, Select + Start unless the [hotkeys](#hotkeys) say otherwise, and for a GBA / PS1 / N64 game each hotkey set); with a remapping in `recomp.cfg`, first « Your mapping » and each changed control (your button, the Xbox control). A GBA / PS1 / N64 game: each of its buttons and the controls it comes from ([Controls for the other consoles](#controls-for-the-other-consoles)). |
 | Screenshot | Closes the menu first, then saves the game's last frame as `<external files>/screenshots/<date>.bmp` (`xbox_FramebufferDumpBmp`, the companion panel's), and says « Saved … » at the top of the screen (and on the panel). |
 | Change disc | Only for a PlayStation game with two discs or more found beside it (XBA-166, [PlayStation games](#playstation-games-xba-168)): a page of its discs, « In the drive » under the one playing; choosing another closes the menu and the lid opens, a second later the new disc is in. |
@@ -2885,6 +2931,59 @@ thumbnail, the dimmed empty slot on Load), saving and loading with each error me
 the opener, the Fast-forward line in a GBA game's Controls. Rendered over a made-up game frame to `build/screenshots/menu-*.png`: closed, main,
 quit armed, quick settings, controls, closed with the overlay and a message; en and fr at 1080p and 720p; and the
 save slots in English at 1080p (`menu-save-slots.png`) (`--target app-unit-tests-out`). C: `tests/recomp_lifecycle` (the reasons) and `tests/apu_volume`.
+
+### Live picture and Restart to apply
+
+The picture keys (`ConsoleVideo.LIVE_KEYS`: `RECOMP_SCALE`, `RECOMP_FILTER`, `RECOMP_SHADER` and its strength,
+curvature and ghosting) take effect while the game runs. After each change in the menu (Settings or Game settings),
+when the menu opens and when the game comes back from the launcher, `GameMenu` resolves the picture
+(`ConsoleVideo.livePicture`: the game's value, else recomp.cfg's, else the runtime's default; the GBA's filter
+nearest, the others linear) and, when it differs from the one shown, hands it to `MenuNative.nativeSetPicture`:
+
+- a GBA, PS1 or N64 game: `host_window_request_picture` (`src/video/host_window.c`), any thread; the presenting
+  thread takes it at its next present (`live_take`), so the picture never changes in the middle of a frame. While
+  the menu holds the game no frame is presented: the change shows as the menu closes.
+- an Xbox title: `xbox_FramebufferWindowSetShader` (`src/video/fb_present_sdl.c`); the window's loop takes it at its
+  next turn and draws the shown frame again, so it shows at once, behind the open menu too. LCD is drawn as none
+  (no pixel grid for an Xbox frame); a preset whose shader failed to build stays off.
+
+Logcat: « shell: menu: picture applied live (menu): scale integer, filter nearest, shader crt (…) », then
+« [HOST] window: picture changed live: … » or « [FBWIN] picture shader changed live: … ».
+
+Everything else is read once at the start (the language and the console video settings the Xbox kernel answers
+with, which a title asks for once; the internal resolution, whose GPU buffers are made at that size; the Vulkan
+driver, loaded in the process; most Game settings). `GameMenu` keeps what the game started with of these (its
+environment, `GameSettings.runEnv`, without the picture keys, an unset key as recomp.cfg has it, and an N64 game's
+Vulkan driver) and compares after each change: while they differ, **Restart to apply** (« Some changes are waiting
+for it ») is the first row of Settings and Game settings; going back to the starting values hides it. A first press
+arms it (« Press again to restart », and « The game picks up where you are » when Resume where I left off applies,
+else « Progress since the last save is lost »), a second within 4 s saves the automatic slot (GBA / PS1 / N64) and
+asks the launcher to start the game again in a new process (`ShellActivity.restartGame`, the title's quick reboot
+path: `LauncherActivity.ACTION_RESTART_GAME`).
+
+**Rows in the narrow drawer.** A setting row whose label and widest choice do not fit side by side is stacked
+(`Widgets.MenuRow`): the label whole on its line, the value under it, the arrows at the right edge; a setting's
+« This game » badge sits left of its value (or after it when stacked) instead of hiding it. The list is clipped
+between the page title and the hints when it scrolls.
+
+### Device check (live picture, Restart to apply), for Alex
+
+1. A GBA game › menu › Settings: every row's name reads whole (Scale, Filter, Picture shader, Game settings), in
+   French and in English.
+2. Scale → Integer, close the menu: the picture is integer-scaled at once. Filter → Linear: soft at once, Nearest:
+   sharp again.
+3. Picture shader → CRT, close the menu: CRT at once. LCD: the grid at once. As in Settings: back to Settings' shader.
+4. An Xbox title › menu › Settings › Picture shader → Scanlines: the scanlines show behind the open menu.
+5. Same title: Language → another language: « Restart to apply » appears at the top. Back to the first language: it
+   goes away.
+6. Language changed again, press « Restart to apply »: it asks to press again; press again: the game starts again in
+   the new language.
+7. An N64 game: Resolution → 2x: « Restart to apply »; press twice: the game comes back where it was (with Resume where
+   I left off on) at 2x.
+8. A long Settings list (N64 game, 720p device): scroll to the bottom; no row draws over « Paused · 0:42 played » or
+   over the A / B hints.
+9. Launcher › a game › Game settings › Picture shader → Sharp while the game waits in the background; Play: the game
+   shows Sharp at once.
 
 ### Device check (in-game menu), for Alex
 

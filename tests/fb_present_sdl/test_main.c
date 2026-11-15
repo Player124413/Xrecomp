@@ -18,6 +18,8 @@
  *   lcd         no LCD grid for an Xbox: drawn as none, none active
  *   override    RECOMP_XBOX_SHADER=scanlines wins over RECOMP_SHADER=crt
  *   fail        RECOMP_SHADER_TEST_FAIL=crt: the shader does not build, none is drawn, none active
+ *   live        none at the start, scanlines set live (xbox_FramebufferWindowSetShader, the in-game menu) drawn
+ *               from the window's next turn, then lcd set live: none
  * Skipped (77) with no display or under XBR_BUILD_ONLY. `fb_present_sdl_test <case>` runs one case.
  */
 #include "video_player.h"
@@ -249,7 +251,26 @@ static int guest_main(void)
         free(px);
         return 1;
     }
-    if (!strcmp(s_case, "none") || !strcmp(s_case, "lcd") || !strcmp(s_case, "fail")) {
+    if (!strcmp(s_case, "live")) {
+        /* The in-game menu's live change (xbox_FramebufferWindowSetShader): started without one, scanlines from the
+         * window's next turn, then lcd, which an Xbox frame draws as none. */
+        CHECK(xbox_FramebufferWindowShaderActive() == HOST_SHADER_NONE);
+        check_plain(&p);
+        free(p.rgb);
+        p.rgb = NULL;
+        xbox_FramebufferWindowSetShader(HOST_SHADER_SCANLINES, -1, 0, 0);
+        for (int i = 0; i < 200 && xbox_FramebufferWindowShaderActive() != HOST_SHADER_SCANLINES; i++)
+            sleep_ms(10);
+        CHECK(xbox_FramebufferWindowShaderActive() == HOST_SHADER_SCANLINES);
+        if (shot(px, FW, FH, XBOX_FB_HOST_BGRX8888, &p))
+            check_scanlines(&p);
+        else
+            s_fail = 1;
+        xbox_FramebufferWindowSetShader(HOST_SHADER_LCD, -1, 0, 50);
+        for (int i = 0; i < 200 && xbox_FramebufferWindowShaderActive() != HOST_SHADER_NONE; i++)
+            sleep_ms(10);
+        CHECK(xbox_FramebufferWindowShaderActive() == HOST_SHADER_NONE);
+    } else if (!strcmp(s_case, "none") || !strcmp(s_case, "lcd") || !strcmp(s_case, "fail")) {
         CHECK(xbox_FramebufferWindowShaderActive() == HOST_SHADER_NONE);
         check_plain(&p);
     } else if (!strcmp(s_case, "scanlines") || !strcmp(s_case, "rgbx") || !strcmp(s_case, "override")) {
@@ -298,6 +319,7 @@ static const Case k_cases[] = {
     { "lcd", "lcd", NULL, NULL, NULL },
     { "override", "crt", "scanlines", NULL, NULL },
     { "fail", "crt", NULL, "RECOMP_SHADER_TEST_FAIL", "crt" },
+    { "live", NULL, NULL, NULL, NULL },
 };
 
 /* Runs fn in a child under a time limit; its exit status (-1: killed or crashed). */

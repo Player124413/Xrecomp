@@ -55,6 +55,11 @@ import java.util.zip.ZipOutputStream;
  * The native runtime (consoles/n64/runtime/n64_vk_driver.c) reads {@link #ENV_DIR} (the driver directory, absolute,
  * ending in « / »), {@link #ENV_LIB} (meta.json's libraryName), {@link #ENV_HOOK_DIR} (nativeLibraryDir) and
  * {@link #ENV_ID}; {@link #ENV_FORCE} = « system » (recomp.cfg) wins over them and is never set here.
+ *
+ * Compiled shaders (consoles/n64/runtime/n64_vk_cache.h): {@link #ENV_CACHE_DIR} =
+ * &lt;cache&gt;/vk_cache/&lt;id or « system »&gt;/ (getCacheDir(): the system may clear it, the runtime then
+ * compiles again), where the runtime keeps the Vulkan pipeline cache (pipelines-&lt;UUID&gt;.bin) and Mesa's own
+ * shader cache (mesa/).
  */
 final class VkDrivers {
     static final String DIR = "vk_drivers";
@@ -75,7 +80,10 @@ final class VkDrivers {
                         ENV_LIB = "RECOMP_VK_DRIVER_LIB",
                         ENV_HOOK_DIR = "RECOMP_VK_HOOK_DIR",
                         ENV_ID = "RECOMP_VK_DRIVER_ID",
-                        ENV_FORCE = "RECOMP_VK_DRIVER";
+                        ENV_FORCE = "RECOMP_VK_DRIVER",
+                        ENV_CACHE_DIR = "RECOMP_VK_CACHE_DIR";
+    /** Under getCacheDir(): one directory per driver id, and « system » (SYSTEM) for the system driver. */
+    static final String CACHE_DIR = "vk_cache";
 
     static final int MAX_ENTRIES = 16;
     static final long MAX_TOTAL = 256L << 20;      // uncompressed, all entries together
@@ -715,6 +723,18 @@ final class VkDrivers {
         out.add(new String[] {ENV_HOOK_DIR, on ? hookDir : null});
         out.add(new String[] {ENV_ID, on ? d.id : null});
         return out;
+    }
+
+    /**
+     * The compiled-shader cache for the game process: {ENV_CACHE_DIR, &lt;cacheDir&gt;/vk_cache/&lt;d.id or
+     * « system »&gt;/}, value null (unset) without a cache directory (not an N64 game). One directory per driver: a
+     * driver never reads another's files (the runtime also keys the file by the device's pipelineCacheUUID).
+     */
+    static String[] cacheEnv(Driver d, File cacheDir) {
+        if (cacheDir == null)
+            return new String[] {ENV_CACHE_DIR, null};
+        String id = d != null && ID.matcher(d.id).matches() ? d.id : SYSTEM;
+        return new String[] {ENV_CACHE_DIR, new File(new File(cacheDir, CACHE_DIR), id).getAbsolutePath() + "/"};
     }
 
     // ---- For a game's own app (inheriting XRecomp's choice) --------------------------------------------------------

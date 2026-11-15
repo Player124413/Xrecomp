@@ -83,6 +83,7 @@ typedef struct ConsolePadOut {
     int16_t stick_x[CONSOLE_PAD_MAX_STICKS];   /* host units, -32768..32767, +y down (SDL) */
     int16_t stick_y[CONSOLE_PAD_MAX_STICKS];
     uint32_t host_buttons;                     /* the physical pad's raw HOST_PAD_* (chords the runtime reads) */
+    uint32_t overlay_buttons;                  /* the targets the touch overlay presses (console_pad_merge) */
 } ConsolePadOut;
 
 /* "gba", "ps1", "n64" -> CONSOLE_PAD_*, else CONSOLE_PAD_NONE. */
@@ -111,6 +112,11 @@ const char *console_pad_source_name(int source);
 /* The targets any of `sources` (CPS_BIT set) drives in *m: what a runtime hides from the game while a hotkey chord of
  * those sources is held (XBA-182: Back + right trigger, hold to fast-forward). */
 uint32_t console_pad_targets_using(const ConsolePadMap *m, uint32_t sources);
+
+/* A held hotkey chord's buttons (`swallow`: the physical pad's sources, recomp_hotkeys_pad_update) taken out of a
+ * merged *out: only what the physical pad presses is hidden; the touch overlay's targets (out->overlay_buttons) still
+ * reach the game, so a chord on the pad never masks an on-screen button (XBA-212). */
+void console_pad_swallow(const ConsolePadMap *m, ConsolePadOut *out, uint32_t swallow);
 
 /* The host sources a pad state presses (buttons, triggers and stick directions past the thresholds). */
 uint32_t console_pad_sources(const HostPadState *st, int stick_threshold, int trigger_threshold);

@@ -756,6 +756,9 @@ static void test_vi(void)
     static uint32_t px[640 * 576];
     int w, h;
     CHECK(n64_display(m, px, 640, 576, &w, &h) != 0, "blank before the VI is set up");
+    const uint8_t *rgba = NULL;
+    int pitch = 0;
+    CHECK(n64_display_rgba(m, &rgba, &w, &h, &pitch) == -2, "no upscaled scanout: n64_display instead");
 
     /* NTSC 320 x 240, 16-bit, AA off (replicate): the canvas is 320 x 240, the active area (half-lines 37..511) starts
      * on row 1, the framebuffer's own pixels. The VI's guard band blanks VI pixels 108..115 and 741..747: canvas
@@ -941,6 +944,266 @@ static void test_vi(void)
     n64_destroy(m);
 }
 
+/* ---- The VI's change test (n64_display_changed) ------------------------------------------------------------------ */
+
+/* RDP commands into RDRAM at 0x700000 and run through the DPC registers (the software RDP): a fill of rows y0..y1 of
+ * a 320-pixel 16-bit colour image at addr, then SYNC_FULL. */
+static void rdp_fill(n64_machine *m, uint32_t addr, int y0, int y1)
+{
+    const uint64_t op[] = {
+        (uint64_t)0x3F << 56 | (uint64_t)2 << 51 | (uint64_t)(320 - 1) << 32 | addr, /* colour image RGBA16 */
+        (uint64_t)0x2D << 56 | (uint64_t)(320 << 2) << 12 | (uint64_t)(240 << 2),    /* scissor 0,0 .. 320,240 */
+        (uint64_t)0x2F << 56 | (uint64_t)3 << 52,                                    /* fill mode */
+        (uint64_t)0x37 << 56 | 0xF801F801u,                                          /* red */
+        (uint64_t)0x36 << 56 | (uint64_t)(319 << 2) << 44 | (uint64_t)(y1 << 2) << 32 | (uint64_t)(y0 << 2),
+        (uint64_t)0x29 << 56,                                                        /* SYNC_FULL */
+    };
+    const uint32_t base = 0x700000;
+    for (unsigned i = 0; i < sizeof op / sizeof op[0]; i++) {
+        n64_wbe32(m->rdram + base + 8 * i, (uint32_t)(op[i] >> 32));
+        n64_wbe32(m->rdram + base + 8 * i + 4, (uint32_t)op[i]);
+    }
+    w32(m, 0x04100000, base);
+    w32(m, 0x04100004, base + 8 * (uint32_t)(sizeof op / sizeof op[0]));
+}
+
+/* 1 until the picture was made, then 0 until something it is made from changes: the VI's registers, a CPU store or
+ * the RDP's rows inside the RDRAM it reads (not the next buffer, even on a shared 4 KB page), a state load; always 1
+ * interlaced; the gamma dither's noise is not a change. */
+static void test_display_changed(void)
+{
+    n64_options ntsc = {.force_pal = 0};
+    n64_machine *m = mk(&ntsc);
+    static uint32_t px[640 * 576];
+    int w, h;
+    const uint32_t fb = 0x100000, fb2 = fb + 320 * 240 * 2; /* fb2 starts inside fb's last 4 KB page */
+    vi_mode(m, 0x3302, fb, 320, 0x006C02EC, 0x002501FF, 0x200, 0x400);
+    CHECK(n64_display_changed(m) == 1, "no picture yet");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "the same picture");
+    n64_run_frame(m);
+    n64_run_frame(m);
+    CHECK(n64_display_changed(m) == 0, "frames run, nothing written");
+
+    w32(m, fb + 100 * 640 + 8, 0x12345678); /* a CPU store into the framebuffer */
+    CHECK(n64_display_changed(m) == 1, "CPU store into the framebuffer");
+    CHECK(n64_display_changed(m) == 1, "still changed until shown");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "shown");
+    w32(m, 0x300000, 1);
+    CHECK(n64_display_changed(m) == 0, "a store elsewhere");
+
+    rdp_fill(m, fb2, 0, 9);
+    CHECK(n64_display_changed(m) == 0, "the RDP drawing the next buffer (same page as the last line)");
+    CHECK(m->rdram[fb2] != 0, "the RDP drew there");
+    rdp_fill(m, fb, 10, 19);
+    CHECK(n64_display_changed(m) == 1, "the RDP drawing the framebuffer");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK_EQ(px[320 * 12 + 100], 0xFF0000, "its rows shown");
+    CHECK(n64_display_changed(m) == 0, "shown");
+
+    w32(m, 0x04400030, 0x201); /* X_SCALE */
+    CHECK(n64_display_changed(m) == 1, "a VI register");
+    n64_display(m, px, 640, 576, &w, &h);
+    CHECK(n64_display_changed(m) == 0, "shown");
+    w32(m, 0x04400004, fb2); /* the buffer swap */
+    CHECK(n64_display_changed(m) == 1, "VI_ORIGIN");
+    n64_display(m, px, 640, 576, &w, &h);
+
+    w32(m, 0x04400000, 0x3306); /* gamma dither: noise that follows the frame count */
+    n64_display(m, px, 640, 576, &w, &h);
+    n64_run_frame(m);
+    CHECK(n64_display_changed(m) == 0, "gamma dither alone is no change");
+
+    static uint8_t st[N64_RDRAM_SIZE + (1u << 20)];
+    size_t n = n64_state_save(m, st, sizeof st);
+    CHECK(n > 0, "state saved");
+    CHECK(n64_display_changed(m) == 0, "a state save changes nothing");
+    CHECK(n64_state_load(m, st, n) == N64_STATE_OK, "state loaded");
+    CHECK(n64_display_changed(m) == 1, "a state load");
+    n64_display(m, px, 640, 576, &w, &h);
+
+    vi_mode(m, 0x3342, fb, 640, 0x006C02EC, 0x002501FF, 0x400, 0x400); /* interlaced */
+    for (int i = 0; i < 3; i++) {
+        n64_run_frame(m);
+        CHECK(n64_display_changed(m) == 1, "interlaced: every VI (%d)", i);
+        n64_display(m, px, 640, 576, &w, &h);
+    }
+    n64_destroy(m);
+}
+
+/* ---- Deferred DP interrupt (n64_core.c) -------------------------------------------------------------------------- */
+/* The core's policy with a back end that defers (the software RDP behind n64_rdp_set_defer_software: drawn at once,
+ * only its DP interrupt held until n64_rdp_dp_complete). A "game" swaps VI_ORIGIN right after a VI interrupt, sends
+ * `syncs` SYNC_FULLs at `at` VIs into the picture and shows a picture every `vis` VIs. */
+static void dp_sync_full(n64_machine *m)
+{
+    const uint32_t base = 0x700000;
+    n64_wbe32(m->rdram + base, 0x29u << 24);
+    n64_wbe32(m->rdram + base + 4, 0);
+    w32(m, 0x04100000, base);
+    w32(m, 0x04100004, base + 8);
+}
+
+static int dp_irq(n64_machine *m) { return (int)(m->mi_intr >> N64_MI_DP & 1); }
+
+typedef struct {
+    uint64_t deadline; /* EV_DP right after the SYNC_FULL (0: completed at once) */
+    uint64_t vi1;      /* the first VI interrupt after it */
+    int irq_now;       /* the DP interrupt right after the SYNC_FULL */
+    int irq_end;       /* ... at the end of the picture */
+} dp_pic;
+
+static dp_pic dp_picture(n64_machine *m, int vis, double at, int syncs, int k)
+{
+    dp_pic r = {0, 0, 0, 0};
+    const uint64_t period = m->vi_line_ticks * (uint64_t)m->vi_lines;
+    w32(m, 0x04400004, k & 1 ? 0x200000 : 0x100000);
+    n64_run_cycles(m, (uint64_t)(at * (double)period) / N64_TICKS_PER_CYCLE);
+    uint64_t f0 = n64_frames(m);
+    for (int i = 0; i < syncs; i++) {
+        n64_mi_clear(m, N64_MI_DP);
+        dp_sync_full(m);
+    }
+    r.deadline = m->ev[EV_DP] == EV_NEVER ? 0 : m->ev[EV_DP];
+    r.irq_now = dp_irq(m);
+    int left = vis - (int)at;
+    for (int i = 0; i < left; i++) {
+        n64_run_frame(m);
+        if (i == 0)
+            r.vi1 = m->dpp.last_vi;
+    }
+    (void)f0;
+    r.irq_end = dp_irq(m);
+    return r;
+}
+
+static void test_dp_defer(void)
+{
+    int off = 0;
+    CHECK(n64_rdp_defer_parse(NULL, &off) == N64_DP_DEFER_AUTO && off == 62, "default: auto, 1/16 VI");
+    CHECK(n64_rdp_defer_parse("auto", &off) == N64_DP_DEFER_AUTO && off == 62, "auto");
+    CHECK(n64_rdp_defer_parse("0", &off) == N64_DP_DEFER_OFF, "0: off");
+    CHECK(n64_rdp_defer_parse("25", &off) == N64_DP_DEFER_AUTO && off == 250, "25 %% of a VI");
+    CHECK(n64_rdp_defer_parse("1", &off) == N64_DP_DEFER_AUTO && off == 62, "1: on");
+    CHECK(n64_rdp_defer_parse("500", &off) == N64_DP_DEFER_AUTO && off == 1000, "at most a VI");
+
+    n64_rdp_set_defer_software(1);
+    n64_machine *m = mk(NULL); /* PAL */
+    n64_set_rdp_defer(m, N64_DP_DEFER_AUTO, 0);
+    const uint64_t period = m->vi_line_ticks * (uint64_t)m->vi_lines;
+    for (int i = 0; i < 70; i++) /* the first second: never */
+        n64_run_frame(m);
+
+    /* A picture every VI: never deferred. */
+    int deferred = 0;
+    for (int k = 0; k < 10; k++) {
+        dp_pic p = dp_picture(m, 1, 0.3, 1, k);
+        deferred += p.deadline != 0;
+        CHECK(p.irq_now, "1 VI: the DP interrupt at once (%d)", k);
+    }
+    CHECK(deferred == 0, "a picture every VI: %d deferred", deferred);
+
+    /* Every 3 VIs, SYNC_FULL at 0.7 VI (Ocarina of Time): deferred from the 4th picture, to the next VI + 1/16. */
+    deferred = 0;
+    for (int k = 0; k < 10; k++) {
+        dp_pic p = dp_picture(m, 3, 0.7, 1, k);
+        if (k < 3) {
+            CHECK(!p.deadline && p.irq_now, "3 VIs, picture %d: at once (3 qualifying pictures first)", k);
+        } else {
+            CHECK(p.deadline && !p.irq_now, "3 VIs, picture %d: deferred", k);
+            CHECK_EQ(p.deadline, p.vi1 + period * 62 / 1000, "deadline: the next VI + 1/16");
+            CHECK(p.irq_end, "3 VIs, picture %d: the DP interrupt by the end", k);
+        }
+        deferred += p.deadline != 0;
+    }
+    CHECK(deferred == 7, "3 VIs: %d deferred", deferred);
+    n64_perf pf;
+    n64_perf_get(m, &pf);
+    CHECK(pf.dp_backoffs == 0, "no backoff (%llu)", (unsigned long long)pf.dp_backoffs);
+
+    /* Every 2 VIs, SYNC_FULL early in the first one: deferred too (the swap is a whole VI after the deadline). */
+    deferred = 0;
+    for (int k = 0; k < 8; k++) {
+        dp_pic p = dp_picture(m, 2, 0.3, 1, k);
+        deferred += p.deadline != 0;
+        if (p.deadline)
+            CHECK(p.irq_end, "2 VIs, picture %d: the DP interrupt by the end", k);
+    }
+    CHECK(deferred >= 4, "2 VIs, SYNC_FULL at 0.3: %d deferred", deferred);
+
+    /* Every 2 VIs, SYNC_FULL in the second VI (the game swaps at the first VI after it): never, once the first such
+     * picture (deferred on the strength of the ones before) is judged. */
+    deferred = 0;
+    for (int k = 0; k < 8; k++)
+        deferred += dp_picture(m, 2, 1.5, 1, k).deadline != 0 && k > 0;
+    CHECK(deferred == 0, "2 VIs, SYNC_FULL at 1.5: %d deferred", deferred);
+
+    /* Two SYNC_FULLs per picture: never. */
+    deferred = 0;
+    for (int k = 0; k < 8; k++)
+        deferred += dp_picture(m, 3, 0.7, 2, k).deadline != 0;
+    CHECK(deferred == 0, "2 SYNC_FULLs a picture: %d deferred", deferred);
+
+    /* Deferring again, then a picture that comes a VI later: backoff, nothing deferred for 500 VIs. */
+    for (int k = 0; k < 5; k++)
+        dp_picture(m, 3, 0.7, 1, k);
+    dp_pic p = dp_picture(m, 4, 0.7, 1, 1);
+    CHECK(p.deadline != 0, "deferred before the late picture");
+    dp_picture(m, 3, 0.7, 1, 0); /* its VI_ORIGIN change judges the 4-VI picture */
+    n64_perf_get(m, &pf);
+    CHECK(pf.dp_backoffs == 1, "a later picture while deferring: backoff (%llu)", (unsigned long long)pf.dp_backoffs);
+    deferred = 0;
+    for (int k = 0; k < 20; k++)
+        deferred += dp_picture(m, 3, 0.7, 1, k).deadline != 0;
+    CHECK(deferred == 0, "during the backoff: %d deferred", deferred);
+    for (int i = 0; i < 500; i++)
+        n64_run_frame(m);
+
+    /* A save state completes a pending one first: it never holds one. */
+    for (int k = 0; k < 4; k++)
+        dp_picture(m, 3, 0.7, 1, k);
+    w32(m, 0x04400004, 0x100000);
+    n64_run_cycles(m, (uint64_t)(0.7 * (double)period) / N64_TICKS_PER_CYCLE);
+    n64_mi_clear(m, N64_MI_DP);
+    dp_sync_full(m);
+    CHECK(m->ev[EV_DP] != EV_NEVER && !dp_irq(m), "pending before the save");
+    static uint8_t st[N64_RDRAM_SIZE + (1u << 20)];
+    size_t n = n64_state_save(m, st, sizeof st);
+    CHECK(n > 0, "state saved");
+    CHECK(m->ev[EV_DP] == EV_NEVER && dp_irq(m), "the save completed it");
+    n64_perf_get(m, &pf);
+    CHECK(pf.dp_early == 1, "dp_early %llu", (unsigned long long)pf.dp_early);
+    CHECK(n64_state_load(m, st, n) == N64_STATE_OK, "state loaded");
+    CHECK(m->ev[EV_DP] == EV_NEVER, "the state holds none");
+    CHECK(m->dpp.warm == 0 && m->dpp.streak == 0, "the policy starts again after a load");
+
+    /* Reset drops a pending one; off: never. */
+    for (int i = 0; i < 70; i++)
+        n64_run_frame(m);
+    for (int k = 0; k < 4; k++)
+        dp_picture(m, 3, 0.7, 1, k);
+    w32(m, 0x04400004, 0x100000);
+    n64_run_cycles(m, (uint64_t)(0.7 * (double)period) / N64_TICKS_PER_CYCLE);
+    n64_mi_clear(m, N64_MI_DP);
+    dp_sync_full(m);
+    CHECK(m->ev[EV_DP] != EV_NEVER, "pending before the reset");
+    n64_reset(m);
+    CHECK(m->ev[EV_DP] == EV_NEVER && !dp_irq(m), "reset dropped it");
+    n64_destroy(m);
+
+    m = mk(NULL);
+    n64_set_rdp_defer(m, N64_DP_DEFER_OFF, 0);
+    for (int i = 0; i < 70; i++)
+        n64_run_frame(m);
+    deferred = 0;
+    for (int k = 0; k < 10; k++)
+        deferred += dp_picture(m, 3, 0.7, 1, k).deadline != 0;
+    CHECK(deferred == 0, "off: %d deferred", deferred);
+    n64_destroy(m);
+    n64_rdp_set_defer_software(0);
+}
+
 /* ---- Save states (XBA-183) -------------------------------------------------------------------------------------- */
 
 static void test_states(void)
@@ -1049,6 +1312,8 @@ int main(void)
     test_ai();
     test_ai_resampler();
     test_vi();
+    test_display_changed();
+    test_dp_defer();
     test_states();
     printf("n64_io: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

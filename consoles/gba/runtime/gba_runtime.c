@@ -528,8 +528,7 @@ static uint16_t pads_keys(uint32_t *hk_held, uint32_t *hk_pressed)
             uint32_t pressed = 0, swallow = 0;
             *hk_held |= recomp_hotkeys_pad_update(hk, &s_hk_pad[p], src, &pressed, &swallow);
             *hk_pressed |= pressed;
-            if (swallow)
-                o.buttons &= ~console_pad_targets_using(&s_pad_map, swallow);
+            console_pad_swallow(&s_pad_map, &o, swallow); /* a held chord's buttons: not the on-screen pad's */
             k |= gba_runtime_keys_of(o.buttons);
         }
     }

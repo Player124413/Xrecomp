@@ -48,7 +48,7 @@ int main(void)
     uint8_t *ram = calloc(1, RAM_SIZE);
     if (!ram)
         return 1;
-    n64_rcp_bus bus = {ram, RAM_SIZE, raise_irq, clear_irq, NULL, NULL};
+    n64_rcp_bus bus = {ram, RAM_SIZE, raise_irq, clear_irq, NULL, NULL, NULL};
     n64_rsp *s = n64_rsp_create(bus);
     n64_rdp *d = n64_rdp_create(bus);
     n64_rsp_attach_rdp(s, d);

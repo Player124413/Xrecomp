@@ -49,7 +49,9 @@ off Android) together with those workers: its target is the frame period, and ea
 working, not the sleep to the next deadline, so the governor raises the clocks only as far as the frames need. The
 frame loop and the workers also run at a display thread's priority (nice -8). The log says
 `perf hint: ADPF session open for N thread(s), target 16.68 ms per frame`. paraLLEl-RDP's own threads (the Vulkan
-RDP's command and timeline threads) are not in the session nor tracked.
+RDP's command ring worker, fence executor and pipeline compile worker) call the same hook (`RDP::set_thread_hook`, our
+patch in `third_party/parallel-rdp`, given the hook of `n64_rdp_set_thread_hook` when the Vulkan RDP is created), so
+they are in the session, at nice -8 and put back on the fast cores after a resume like the software RDP's bands.
 
 CMake options `XBR_CONSOLE_GBA`, `XBR_CONSOLE_PS1` and `XBR_CONSOLE_N64` are ON by default on Linux and macOS and OFF
 on Android and Windows. A console is turned on for Android once it is ready: the GBA (XBA-157), the PS1 (XBA-168) and
@@ -175,7 +177,9 @@ transfers complete after their length), the three root counters with every clock
 scanline / VBlank scheduler driven by `ps1_gpu_get_timing` (`ps1_io.c`), SIO0 with the digital pad, the DualShock
 (digital or analog mode; config mode: 0x43 enter / exit, 0x44 mode + lock, 0x45 status, 0x46 / 0x47 / 0x4C tables,
 0x4D rumble mapping, whose motors `ps1_pad_rumble` reports; `ps1_pad_analog_button`) and two 128 KB memory cards (`ps1_sio.c`; `ps1_card_data` / `ps1_card_take_dirty` / `ps1_card_load` like
-the GBA saves). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
+the GBA saves; JOY_STAT bit 7 is the /ACK level, a pulse of `PS1_SIO_ACK_PULSE` = 100 cycles from the IRQ as on
+hardware, not a latch: Duke Nukem - Time to Kill's card handler waits for it to drop with interrupts off; bit 9, the
+IRQ, stays until JOY_CTRL bit 4). The other chips are reached through `ps1_devices.h` only: target `ps1_core` links `ps1_gpu`, `ps1_cd`,
 `ps1_spu` and `ps1_mdec`, each the real module or its placeholder `ps1_<dev>_stub.c` when the source is absent.
 
 BIOS: **OpenBIOS** (MIT, PCSX-Redux's nugget tree), built from source by `tools/consoles/build_ps1_bios.sh` at the
@@ -401,6 +405,10 @@ an EXE gets `EXE-<CRC32>`. Every option is listed at the top of `runtime/tools/p
 (`consoles/ps1/tests/test_main.c`: the helpers and `.m3u` parsing, then gfx.exe fast-booted, through `fd:N`, a memory
 card read back and left alone, gfx.cue booted by the BIOS to its 320 x 240 picture, the errors, a save written and
 reloaded, a playlist's disc swap, fast boot on and off); `ps1_hb_fastboot_*` boot every homebrew disc fast.
+Diagnostic in the log (stdout, logcat on Android; no effect on the game): `ps1: the game has not left pc 0x… for 5 s
+with interrupts off (I_STAT …, I_MASK …)` once when, for 300 frame ends in a row, SR.IEc is 0 and the PC stays in one
+64-byte window (a hang in a device the loop polls: no IRQ handler can get it out), and `ps1: running again` when it
+leaves (`ps1_runtime.c`, `stall_check`).
 
 **N64 core (N-1 XBA-169, N-3 XBA-171, N-4 XBA-172).** Interpreter first, the PS1's shape. `consoles/n64/runtime/n64_core.h`:
 a VR4300 interpreter (`n64_cpu.c`: every MIPS III integer instruction, 64-bit ops, LL / SC / LLD / SCD, LWL..SDR,
@@ -502,28 +510,80 @@ skipped), followed by a performance line (`n64_runtime_perf`; also once at exit 
 the run:`), for device reports:
 
 ```
-n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present 0.9 audio 0.1
-idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M instr, rdp 3400 cmds,
-2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale
-2x, rewind off; core 6 @ 1.90 GHz
+n64: perf speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5, scanout 0.5) sched 0.3 vi 1.8
+present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames; rsp 1.20 M
+instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes, 40 slow lookups;
+rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz
+n64: perf detail 500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts (160
+early), 40 full rings; DP 160 deferred (0 early, 0 backoffs), 7 at once, 12 waited 3.5 ms (0.02 ms each); 0 stalled
+compiles (0 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0, sync 8.0, deadline
+0.2, scanout 3.0)
 ```
 
 Speed is N64 frames per second against the VI's rate. Times are ms per N64 frame: `n64_run_frame` split into the CPU
-(interpreter or pack), the RSP, the RDP (the software RDP draws there, the Vulkan RDP queues) and `sched` (the
-scheduler, VI / AI / PI / SI events) as the core's timed frames split it (`n64_perf`: one frame in 8 is timed stage by
-stage, two clock reads per CPU slice; the counts run on every frame); `wait` the RDP's flushes (the threaded software
-RDP drawing its batch, the Vulkan RDP waiting for the GPU, its write-back and its upscaled scanout), inside `rdp` or
-`vi`; then `n64_display`, the RGBA conversion and present, the audio pull and queue, the sleep to the next deadline
+(interpreter or pack), the RSP, the RDP and `sched` (the scheduler, VI / AI / PI / SI events) as the core's timed
+frames split it (`n64_perf`: one frame in 8 is timed stage by stage, two clock reads per CPU slice; the counts run on
+every frame). `rdp` is every `n64_rdp_run`, also those the RSP's DPC_END writes start inside its time slice (which `rsp`
+then leaves out, so `rsp` is the RSP's own work): the software RDP draws there, the Vulkan RDP queues its commands to
+paraLLEl-RDP, blocks while paraLLEl-RDP's command ring is full (`queue`) and waits at SYNC_FULL. In brackets the RDP's
+waits: `queue` that back-pressure (inside `rdp`), `sync` its flushes (the threaded software RDP drawing its batch, the
+Vulkan RDP waiting for the GPU and its write-back: at SYNC_FULL inside `rdp`, the VI's inside `vi`), `scanout` the
+upscaled scanout's GPU wait and read-back (inside `vi`); then `n64_display`, the RGBA conversion and present, the audio pull and queue, the sleep to the next deadline
 (`idle`, frame generation's draws during it included), and `other` what is left (pads, cheats, rewind captures, save
 files). The host frames (one shown or skipped picture) are measured without their sleep: the worst one and how many took
 longer than one and two VI frames. With a pack: the share of the CPU's instructions lifted code ran, the RDRAM
 instructions the interpreter ran, re-hashes (a page holding lifted code written) and dispatch cache misses. Then the RDP
 back end (and the software RDP's threads), the internal resolution, rewind, and the host core the loop is on with its
 `scaling_cur_freq` (Linux / Android; `core ?` elsewhere). The counters are host-only: not in save states, no effect on
-the run (`n64_run --perf N` prints the core's part, run hashes unchanged). Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play
---frameskip`): `auto` (default) skips the picture of a frame
-that starts more than half a frame late or while the audio queue is about to run dry, at most 3 in a row; `N` shows
-one frame in N + 1; `0` never. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
+the run (`n64_run --perf N` prints the core's part, run hashes unchanged). The detail line that follows: the VIs (N64
+frames) against the pictures made and shown (`n64_display`), the VIs whose picture had not changed and the new
+pictures frame skip dropped; the game's buffer swaps (VI_ORIGIN changes), the Vulkan RDP's upscaled scanouts (of
+which started early, at the VI_ORIGIN change) and the times its command ring was full; the deferred DP interrupts
+(below: SYNC_FULLs deferred, completed early for a save state, backoffs, completed at once; the deadlines where the
+GPU was still drawing, the wait at the deadlines and its mean per deferred one); paraLLEl-RDP's "Stalled compile"
+pipelines (5 ms or more) and their time; then the worst host frame's own breakdown: `n64_run_frame`, `n64_display`,
+present, audio, the rest, and the RDP's waits inside that frame (`deadline`: at a deferred DP interrupt's deadline,
+inside `core`).
+
+Deferred DP interrupt (Vulkan RDP; `n64_core.c` « Deferred DP interrupt », `n64_core.h` `n64_set_rdp_defer`). At a
+SYNC_FULL the Vulkan RDP hands the work to the GPU and asks the core (`n64_devices.h` `bus.defer_dp`) whether the DP
+interrupt may come later; paraLLEl-RDP's command ring holds 1 MB of commands (our patch; 16 KB before, so the
+emulation thread used to wait for the GPU while a display list was queued: `queue`). The core answers from emulated
+facts only, so the interrupt's moment is the same on every host: when the last 3 pictures each lasted 2 VIs or more,
+had exactly one SYNC_FULL, at least 2 VI interrupts before the next VI_ORIGIN change, and their DP interrupt came
+before it (Ocarina of Time PAL: SYNC_FULL at 0.7 VI, the swap 2.3 VIs later), a second after reset or a state load,
+the interrupt comes at the next VI interrupt plus 1/16 VI: the GPU's work is waited for there (`deadline`), after the
+host's frame pacing, at the start of a light frame, instead of inside the frame that queued it. Otherwise (a picture
+every VI, several SYNC_FULLs per picture, a game that swaps at the first VI after the RDP is done) at once as before.
+A picture that comes later than before while deferring stops it for 500 VIs (`backoffs`). Until the deadline the RDP
+keeps its busy bits; `n64_rdp_flush` (a picture to show, a save state) waits for the GPU but leaves the interrupt to
+its deadline; a save state completes a pending one first (states never hold one, their format is unchanged); reset
+and state loads drop it; a second SYNC_FULL completes the first. With it, the upscaled scanout of a new picture starts
+at the VI_ORIGIN change (`n64_rdp_scanout_prefetch`, while nothing is queued in front of it on the GPU) and
+`n64_display` takes it unless the registers changed or something was drawn or written where the VI reads (`scanouts
+(N early)`). `RECOMP_N64_RDP_DEFER=0` turns both off (`auto` default; a number: the deadline's offset after the VI
+interrupt in percent of a VI), `RECOMP_N64_SCANOUT_EARLY=0` the early scanout alone. The software RDP never defers
+(`n64_rdp_set_defer_software` / `RECOMP_N64_RDP_DEFER_SOFTWARE=1` route it through the policy, for tests).
+
+Upscaled picture path: the frame loop hands the window the Vulkan RDP's scanout where the GPU copied it
+(`n64_display_rgba` / `n64_rdp_scanout_rgba`: RGBA8 in one of two kept, mapped `VIScanoutBuffer`s, the crop as an
+offset, the row pitch as it is): one copy (the texture upload) instead of the read-back's copy, RGBA -> XRGB -> RGBA
+and the window's copy for screenshots (`host_window_present_rgba_shared`: `host_window_screenshot_bmp` asks the
+runtime for the last picture on demand). The window's shaders draw it opaque (the VI's alpha byte is ignored). The
+last frame of a bounded run (`--screenshot`), save-state thumbnails (1x) and the 1x / software pictures keep the XRGB
+path. `RECOMP_N64_PRESENT_DIRECT=0` goes through the XRGB buffer as before.
+
+Pictures: the frame loop makes, converts and
+uploads a picture only for a VI whose picture changed since the last one shown (`n64_display_changed`: the VI
+registers, the RDRAM it reads written by the CPU, a DMA or the RDP, rows the Vulkan RDP has queued there, a state load;
+interlaced modes always): a game that draws one picture per 2 or 3 VIs (Ocarina of Time PAL) scans out, converts and
+uploads once per picture, and the other VIs draw the window's texture again (`host_window_present_again`; nothing
+with frame generation, which paces itself). `RECOMP_N64_PRESENT_ALWAYS=1` makes a picture on every VI as before.
+Frame skip (`RECOMP_N64_FRAMESKIP`, `n64_play --frameskip`) decides on new pictures only (an unchanged VI is neither
+shown nor skipped): `auto` (default) skips a new picture when its frame starts more than half a frame late or while
+the audio queue is about to run dry, never two in a row (a skipped picture is still new at the next VI and shown
+then); `N` shows one new picture in N + 1; `0` never. With `RECOMP_N64_PRESENT_ALWAYS=1` it decides on every VI,
+`auto` at most 3 in a row. A skipped frame still runs whole (CPU, RSP, the RDP drawing into RDRAM, which games
 read back) and makes its audio: only `n64_display` and the present are skipped (the software RDP commits its pixels
 at the end of every emulated frame, `n64_rdp_frame_end`, shown or not). The software RDP's renderer threads
 (`n64_rdp_set_threads`): `RECOMP_N64_RDP_THREADS`, else 2 on Android, else the core's (`XBR_N64_RDP_THREADS`, else
@@ -682,6 +742,14 @@ bit for bit against angrylion.
   fails (no `libxba_vkdriver.so`), the same path as a driver that cannot be opened. In the app the player picks
   the driver in Settings › Graphics › Vulkan driver (downloaded from GitHub releases or imported as a zip; none
   ships with the app): [app-shell.md « Vulkan drivers »](../docs/android/app-shell.md#vulkan-drivers).
+- **Pipeline cache.** With `RECOMP_VK_CACHE_DIR` (the app: `<cache>/vk_cache/<driver id or system>/`), the device's
+  VkPipelineCache starts from `pipelines-<pipelineCacheUUID>.bin` there before the check (`pipeline cache loaded (N
+  KB)` / `no pipeline cache yet` / `pipeline cache ... ignored (truncated)`), and is written back, to a temporary
+  file then renamed, when it grew: after the check, every 10 s (a thread of its own), when the app pauses (sessions
+  on Android end killed after a pause) and at destroy (`pipeline cache saved (N KB, <why>, T ms)`). Mesa's own disk
+  cache goes to `<dir>/mesa` (`MESA_SHADER_CACHE_DIR`, unless set). Without it every start compiled the same
+  pipelines again: ~1.35 s of a 4x start of Ocarina of Time on the Thor's Turnip. `n64_vk_cache.h`;
+  [environment variables](../docs/runtime/environment-variables.md#custom-vulkan-driver-n64-rdp).
 
 Tests (`consoles/n64/tests`, built with `-DXBR_N64_RDP_VULKAN=ON`; without a GPU, Mesa's lavapipe with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`):
@@ -734,7 +802,12 @@ Contract (`n64_recomp.h`, frozen between `n64_tools`, Prepare, the loader and th
 - `n64_attach_recomp` / `n64_recomp_missed` / `n64_recomp_write_missed` (`n64_recomp.c`, called from `n64_cpu_run`):
   RDRAM code in kernel mode, once the CPU reached the boot PC, runs lifted code when an entry matches, the interpreter
   otherwise; the discovered file gets `ADDR HASH HEXBYTES` per miss (a 2 KB window, never past a mapped page). An
-  address seen with 8 contents is code generated at run time: left to the interpreter.
+  address seen with 8 contents is code generated at run time: left to the interpreter; records of an address that
+  agree over their common length are one code (recorded once, merged by the lifter). An entry whose code is not in
+  memory does not cut the interpreter's blocks, and pages no entry's code is in run as the interpreter's chained
+  blocks (`n64_cpu_run_region`), back to the dispatcher only when execution leaves them, at a branch target not
+  recorded yet, or at an event (2026-11-15: the pack's dispatching costs about what the interpreter does). The runtime saves the
+  record at pause, every three minutes and at exit.
 
 Lifted code is tick-exact with the interpreter, in the GBA / PS1 recompilers' shape (compile time on the phone):
 functions cut into blocks (entry, jump targets, return points, every 12 instructions), only block starts resumable

@@ -56,6 +56,12 @@ typedef struct n64_rcp_bus {
     /* Optional (NULL: none): a device wrote RDRAM [addr, addr + len) (SP DMA to RDRAM). The core tracks writes into
      * RDRAM for its static recompilation (n64_recomp.h: code is checked by content). */
     void (*wrote)(void *ctx, uint32_t addr, uint32_t len);
+    /* Optional (NULL: never): an RDP that can finish a SYNC_FULL later (the Vulkan RDP: the GPU still drawing) asks
+     * at each SYNC_FULL. 0: complete it now (draw out, DP interrupt) as always; 1: the core calls
+     * n64_rdp_dp_complete (n64_rdp.h) at the deadline it picked, and until then the RDP keeps its busy bits and does
+     * not raise the interrupt. The RDP completes a pending one itself before asking again (n64_core.c « Deferred DP
+     * interrupt »). */
+    int (*defer_dp)(void *ctx);
 } n64_rcp_bus;
 
 typedef struct n64_rsp n64_rsp;

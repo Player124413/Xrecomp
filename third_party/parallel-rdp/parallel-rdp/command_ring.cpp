@@ -24,10 +24,41 @@
 #include "command_ring.hpp"
 #include "rdp_device.hpp"
 #include "thread_id.hpp"
+#include "thread_hook.hpp"
 #include <assert.h>
+#include <mutex>
 
 namespace RDP
 {
+// xboxrecomp-android patch (thread_hook.hpp).
+static std::mutex thread_hook_lock;
+static ThreadHook thread_hook_fn;
+static void *thread_hook_user;
+
+void set_thread_hook(ThreadHook fn, void *user)
+{
+	std::lock_guard<std::mutex> holder{thread_hook_lock};
+	thread_hook_fn = fn;
+	thread_hook_user = user;
+}
+
+ThreadHookScope::ThreadHookScope()
+{
+	{
+		std::lock_guard<std::mutex> holder{thread_hook_lock};
+		fn = thread_hook_fn;
+		user = thread_hook_user;
+	}
+	if (fn)
+		fn(1, user);
+}
+
+ThreadHookScope::~ThreadHookScope()
+{
+	if (fn)
+		fn(0, user);
+}
+
 void CommandRing::init(
 #ifdef PARALLEL_RDP_SHADER_DIR
 		Granite::Global::GlobalManagersHandle global_handles_,
@@ -71,9 +102,17 @@ void CommandRing::drain()
 void CommandRing::enqueue_command(unsigned num_words, const uint32_t *words)
 {
 	std::unique_lock<std::mutex> holder{lock};
-	cond.wait(holder, [this, num_words]() {
-		return write_count + num_words + 1 <= read_count + ring.size();
-	});
+	// xboxrecomp-android patch: a wait for room is timed (only then: no clock read on the common path).
+	if (write_count + num_words + 1 > read_count + ring.size())
+	{
+		auto t0 = std::chrono::steady_clock::now();
+		cond.wait(holder, [this, num_words]() {
+			return write_count + num_words + 1 <= read_count + ring.size();
+		});
+		blocked_waits++;
+		blocked_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now() - t0).count());
+	}
 
 	size_t mask = ring.size() - 1;
 	ring[write_count++ & mask] = num_words;
@@ -86,6 +125,7 @@ void CommandRing::enqueue_command(unsigned num_words, const uint32_t *words)
 void CommandRing::thread_loop()
 {
 	Util::register_thread_index(0);
+	ThreadHookScope hook_scope; // xboxrecomp-android patch (thread_hook.hpp)
 
 #ifdef PARALLEL_RDP_SHADER_DIR
 	// Here to let the RDP play nice with full Granite.

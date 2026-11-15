@@ -33,9 +33,12 @@
  *   `#` comments:  `ADDR HASH HEXBYTES`  -- ADDR the 32-bit virtual address (hex) where the interpreter had to start,
  *   HASH n64_recomp_hash of the words recorded (16 hex digits), HEXBYTES the code bytes from ADDR as they were in
  *   memory then (big-endian, the console's order; up to N64_RECOMP_SNAPSHOT bytes, never past the end of a mapped
- *   page). A line with ADDR alone names code of the ROM's static images. n64_tools lifts from the recorded bytes, so
+ *   page; a record that lies inside an earlier one of the file with the same bytes holds only its first words). A
+ *   line with ADDR alone names code of the ROM's static images. n64_tools lifts from the recorded bytes, so
  *   code that is in no static image (overlays, decompressed code) gets lifted. An address recorded with
- *   N64_RECOMP_VARIANTS different contents is code generated at run time: it is recorded no more and not lifted. */
+ *   N64_RECOMP_VARIANTS different contents is code generated at run time: it is recorded no more and not lifted.
+ *   Records of an address that agree over their common length are the same code: recorded once (n64_tools merges
+ *   them too). */
 #ifndef N64_RECOMP_H
 #define N64_RECOMP_H
 
@@ -84,10 +87,13 @@ uint64_t n64_recomp_hash(const uint32_t *words, size_t n);
 int n64_attach_recomp(n64_machine *m, const n64_recomp_table *t);
 
 /* Discovery: the distinct addresses where the interpreter had to start running RDRAM code (after the boot PC was
- * reached, in kernel mode) that no attached entry matched. Copies at most max into out, returns the total count. */
+ * reached, in kernel mode; a function's start, a branch taken or jump into code no entry covers, not the code
+ * that follows in sequence) that no attached entry matched. Copies at most max into out, returns the total count.
+ * The record holds 65536 records and 64 MB of code at most. */
 size_t n64_recomp_missed(n64_machine *m, uint32_t *out, size_t max);
 
-/* Appends the missed records (the format above) to path, skipping records the file already holds. Returns the
+/* Appends the missed records (the format above) to path, skipping records that agree with one the file already
+ * holds (read once, then kept: it can be called often, at every pause, and appends only what is new). Returns the
  * records written, or -1 on an I/O error. */
 int n64_recomp_write_missed(n64_machine *m, const char *path);
 
@@ -102,7 +108,8 @@ typedef struct n64_recomp_stats {
     uint64_t rehashes;     /* entries re-hashed because a page they cover was written */
     uint64_t stale;        /* of those, entries whose code was no longer there (overlay swapped, code patched) */
     uint64_t interrupts;   /* interrupts taken */
-    uint64_t blocks;       /* predecoded blocks the interpreter ran for code no entry covers (of interp_ram) */
+    uint64_t blocks;       /* runs of predecoded blocks the dispatcher handed to the interpreter for code no entry
+                            * covers (one block, or chained blocks in a page no entry's code is in; of interp_ram) */
 } n64_recomp_stats;
 void n64_recomp_get_stats(n64_machine *m, n64_recomp_stats *out);
 

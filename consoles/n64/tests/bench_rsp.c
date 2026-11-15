@@ -36,7 +36,7 @@ int main(int argc, char **argv)
     else if (argc > 1)
         seconds = atof(argv[1]);
     static uint8_t rdram[1 << 20];
-    n64_rcp_bus bus = {rdram, sizeof rdram, NULL, NULL, NULL, NULL};
+    n64_rcp_bus bus = {rdram, sizeof rdram, NULL, NULL, NULL, NULL, NULL};
     n64_rsp *s = n64_rsp_create(bus);
     uint8_t *m = n64_rsp_mem(s);
     const uint32_t prog[] = {

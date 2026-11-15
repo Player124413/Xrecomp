@@ -80,21 +80,25 @@ final class Pack {
         return Math.max(0, countAddresses(discoveredFile(filesDir, libraryKey)) - used);
     }
 
-    /** The addresses in a discovered file (one hex number per line; blank lines and # comments skipped). */
+    /**
+     * The records in a discovered file (one per line, `ADDR [HASH [HEXBYTES]]`; blank lines and # comments skipped),
+     * as tools/prepare's reader counts them for pack.json's « discovered ». Read line by line: the N64's file holds
+     * the code bytes of each record and grows past tens of MB.
+     */
     static int countAddresses(File f) {
-        String text;
-        try {
-            text = PrepareProtocol.readText(f, 16 << 20);
-        } catch (IOException e) {
-            return 0;
-        }
         int n = 0;
-        for (String line : text.split("\n")) {
-            int hash = line.indexOf('#');
-            if (hash >= 0)
-                line = line.substring(0, hash);
-            if (!line.trim().isEmpty())
-                n++;
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                 new java.io.InputStreamReader(new java.io.FileInputStream(f), java.nio.charset.StandardCharsets.UTF_8),
+                 1 << 16)) {
+            for (String line; (line = r.readLine()) != null;) {
+                int hash = line.indexOf('#');
+                if (hash >= 0)
+                    line = line.substring(0, hash);
+                if (!line.trim().isEmpty())
+                    n++;
+            }
+        } catch (IOException e) {
+            return n;
         }
         return n;
     }
@@ -195,6 +199,25 @@ final class Pack {
      */
     static String toolkitSha256(File filesDir, String titleId) {
         return hashField(filesDir, titleId, "toolkit_sha256");
+    }
+
+    /**
+     * The toolkit digest the pack of a game of another console was lifted with (packs/&lt;library key&gt;/pack.json's
+     * toolkit_sha256, lower case), or null when there is no readable pack.json or it does not say. PackFreshness
+     * compares it with Toolchain.toolkitDigest, as for an Xbox title.
+     */
+    static String toolkitSha256OfKey(File filesDir, String libraryKey) {
+        if (libraryKey == null || libraryKey.isEmpty())
+            return null;
+        File json = new File(packDir(filesDir, libraryKey), JSON);
+        if (!json.isFile())
+            return null;
+        try {
+            String h = new JSONObject(PrepareProtocol.readText(json, 1 << 20)).optString("toolkit_sha256", "").trim();
+            return h.isEmpty() ? null : h.toLowerCase(Locale.ROOT);
+        } catch (IOException | JSONException e) {
+            return null;
+        }
     }
 
     /**

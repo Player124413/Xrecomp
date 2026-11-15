@@ -272,6 +272,33 @@ static void test_merge(void)
     CHECK(o.stick_x[0] == 5000);
 }
 
+/* XBA-212: a hotkey chord held on the physical pad hides its buttons from the game, never the on-screen pad's. */
+static void test_swallow(void)
+{
+    ConsolePadMap m;
+    ConsolePadOut o;
+    console_pad_defaults(&m, CONSOLE_PAD_PS1);
+    /* The pad holds Back + R1 (a chord), the overlay holds R1 (white) and Cross. */
+    HostPadState p = pad(HOST_PAD_BACK), ov = pad(HOST_PAD_A);
+    p.buttons |= HOST_PAD_RSHOULDER;
+    ov.buttons |= HOST_PAD_RSHOULDER;
+    console_pad_merge(&m, &p, &ov, &o);
+    CHECK(o.overlay_buttons == (T(PS1_T_CROSS) | T(PS1_T_R1)));
+    uint32_t chord = CPS_BIT(CPS_BACK) | CPS_BIT(CPS_RIGHT_SHOULDER);
+    console_pad_swallow(&m, &o, chord);
+    CHECK(o.buttons == (T(PS1_T_CROSS) | T(PS1_T_R1))); /* the overlay's R1 and Cross stay, the pad's Select goes */
+    /* Without the overlay, the chord's buttons are hidden. */
+    console_pad_merge(&m, &p, NULL, &o);
+    CHECK(o.overlay_buttons == 0);
+    console_pad_swallow(&m, &o, chord);
+    CHECK(o.buttons == 0);
+    /* Nothing swallowed: nothing changes. */
+    console_pad_merge(&m, &p, &ov, &o);
+    uint32_t before = o.buttons;
+    console_pad_swallow(&m, &o, 0);
+    CHECK(o.buttons == before);
+}
+
 int main(void)
 {
     test_names();
@@ -281,6 +308,7 @@ int main(void)
     test_n64_defaults();
     test_parse_format();
     test_merge();
+    test_swallow();
     printf("console_pad: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

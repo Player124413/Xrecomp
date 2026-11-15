@@ -563,8 +563,10 @@ final class Widgets {
     /**
      * A list row, drawn on Canvas: its label, and on the right a value or a badge (« Press A again »). A setting
      * (cycler set) shows « < value > » arrows when focused only; left and right step it (and so do taps on the
-     * arrows), and the value pulses when it changes. A setting keeps the width of its widest choice (setChoices), so a
-     * long label is cut short instead of running under it. The row's description is not drawn: the screen shows the
+     * arrows), and the value pulses when it changes. A setting keeps the width of its widest choice (setChoices), so the
+     * label does not move as the value changes; when the label and that width do not fit side by side (a narrow
+     * column: the in-game menu's drawer, « As in Settings (…) » choices), the row is stacked: the label on the first
+     * line, whole, the value under it, the arrows at the right edge. The row's description is not drawn: the screen shows the
      * focused row's in a quiet column of its own. A subtitle (one line under the label) is for the rare row that must
      * say more where it is (the in-game menu's « Press again to quit »).
      */
@@ -724,7 +726,10 @@ final class Widgets {
                 c.drawBitmap(thumb, null, thumbR, thumbP);
                 c.restore();
                 textRight = right - tw - Theme.S4;
-            } else if (value != null && (badge == null || badge.isEmpty())) {
+            } else if (value != null && stacked(x, right)) {
+                drawStacked(c, x, right, h, t);
+                return;
+            } else if (value != null && (badge == null || badge.isEmpty() || cycler != null)) {
                 float vw = valueP.measureText(value), col = Math.max(vw, valueReserve);
                 float arrows = cycler != null ? ARROW + ARROW_GAP : 0;
                 // The value sits at the right edge, and moves left to make room for its arrows when focused.
@@ -747,6 +752,13 @@ final class Widgets {
                     leftArrowX = vx - ARROW_GAP - ARROW / 2;
                 }
                 textRight = right - 2 * arrows - col - Theme.S4;
+                if (badge != null && !badge.isEmpty()) {   // a setting's badge (« This game »): left of its value
+                    float bw = badgeP.measureText(badge), bx = right - 2 * arrows - col - Theme.S2 - bw;
+                    badgeP.setColor(dim ? Theme.TEXT_FAINT : badgeColor);
+                    Paint.FontMetrics bf = badgeP.getFontMetrics();
+                    c.drawText(badge, bx, cy - (bf.ascent + bf.descent) / 2, badgeP);
+                    textRight = bx - Theme.S4;
+                }
             } else if (badge != null && !badge.isEmpty()) {
                 badgeP.setColor(badgeColor);
                 float bw = badgeP.measureText(badge);
@@ -769,6 +781,57 @@ final class Widgets {
             c.drawText(ti, x, top + titleH, titleP);
             subP.setColor(dim ? Theme.TEXT_FAINT : Theme.TEXT_DIM);
             c.drawText(fit(subtitle, subP, avail), x, top + titleH + gap + subH, subP);
+        }
+
+        /**
+         * A setting whose label and widest value do not fit side by side (the label would be cut): stacked. Decided on
+         * the widest choice, not the value shown, so a row does not switch layout as it is stepped. A setting's badge
+         * (« This game ») counts too: it sits left of the value, or after it under the label when stacked.
+         */
+        private boolean stacked(float x, float right) {
+            if (cycler == null || (subtitle != null && !subtitle.isEmpty()))
+                return false;
+            float col = Math.max(valueP.measureText(value), valueReserve);
+            float tag = badge != null && !badge.isEmpty() ? badgeP.measureText(badge) + Theme.S2 : 0;
+            return titleP.measureText(title) > right - 2 * (ARROW + ARROW_GAP) - col - tag - Theme.S4 - x;
+        }
+
+        boolean stackedForTest() {
+            return value != null && stacked(Theme.ROW_INSET, getWidth() - Theme.ROW_INSET);
+        }
+
+        /**
+         * The stacked row: the label, whole, then the value (and its badge) under it; the arrows at the right edge when
+         * focused.
+         */
+        private void drawStacked(Canvas c, float x, float right, float h, float t) {
+            float arrows = 2 * (ARROW + ARROW_GAP);
+            float avail = Math.max(10, right - arrows - x);
+            Paint.FontMetrics tf = titleP.getFontMetrics(), vf = valueP.getFontMetrics();
+            float titleH = -tf.ascent, valueH = -vf.ascent, gap = Theme.S1 / 2f;
+            float top = (h - (titleH + gap + valueH + vf.descent)) / 2;
+            titleP.setColor(dim ? Theme.TEXT_FAINT : blend(Theme.TEXT, Theme.TEXT_BRIGHT, t));
+            c.drawText(fit(title, titleP, avail), x, top + titleH, titleP);
+            String v = fit(value, valueP, avail);
+            float vw = valueP.measureText(v), vy = top + titleH + gap + valueH;
+            valueP.setColor(dim ? Theme.TEXT_FAINT : blend(blend(Theme.TEXT_DIM, Theme.ACCENT, t), Theme.ACCENT, tickT));
+            c.save();
+            float s = 1 + 0.14f * tickT;
+            c.scale(s, s, x + vw / 2, vy + (vf.ascent + vf.descent) / 2);
+            c.drawText(v, x, vy, valueP);
+            c.restore();
+            if (badge != null && !badge.isEmpty()) {
+                float bx = x + vw + Theme.S2;
+                badgeP.setColor(dim ? Theme.TEXT_FAINT : badgeColor);
+                c.drawText(fit(badge, badgeP, Math.max(0, x + avail - bx)), bx, vy, badgeP);
+            }
+            float cy = h / 2, lx = right - ARROW - ARROW_GAP - ARROW;
+            if (t > 0.01f && !dim) {
+                chevP.setColor(Theme.alpha(Theme.ACCENT, t));
+                triangle(c, lx, cy, ARROW, -1);
+                triangle(c, right - ARROW, cy, ARROW, 1);
+            }
+            leftArrowX = lx + ARROW / 2;
         }
 
         private void triangle(Canvas c, float x, float cy, float s, int dir) {

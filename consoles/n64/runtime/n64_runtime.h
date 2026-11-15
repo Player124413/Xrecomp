@@ -164,6 +164,11 @@ int n64_runtime_frameskip_parse(const char *v);
  * is more than half a frame late or the audio is about to run dry, at most 3 in a row (15 fps shown at worst at
  * 60 Hz); a fixed N skips N, shows one. */
 int n64_runtime_frameskip(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
+/* The same over new pictures only (the frame loop asks it only for a VI whose picture changed, n64_display_changed;
+ * an unchanged VI is neither shown nor skipped and leaves *run alone): auto skips at most one new picture in a row
+ * (a skipped picture is still new at the next VI, so it is shown one VI late); a fixed N as above.
+ * RECOMP_N64_PRESENT_ALWAYS=1 brings back n64_runtime_frameskip on every VI. */
+int n64_runtime_frameskip_picture(int mode, int64_t behind_ns, uint64_t frame_ns, int audio_low, int *run);
 
 /* The performance line (n64: perf ...), logged every 10 s after the frame-rate line and once at exit over the whole
  * run (pauses left out): which configuration ran and where the host's time went. Times are ms per N64 frame: the
@@ -178,6 +183,10 @@ typedef struct n64_runtime_perf {
     uint64_t host_frames;     /* host frames */
     double vi_hz;             /* the game's VI rate (the full speed) */
     double cpu_ms, rsp_ms, rdp_ms, sched_ms, rdp_wait_ms;
+    /* The RDP's waits split (ms per N64 frame): queue = room in the Vulkan RDP's full command ring (inside rdp), sync
+     * = the flushes (SYNC_FULL inside rdp, the VI's inside vi; rdp_wait_ms less the scanout), scanout = the
+     * upscaled scanout's GPU wait and read-back (inside vi). */
+    double rdp_queue_ms, rdp_sync_ms, rdp_scanout_ms;
     double vi_ms;             /* n64_display (the VI's picture, the upscaled scanout) */
     double present_ms;        /* RGBA conversion and host_window_present_rgba */
     double audio_ms;          /* n64_audio_pull and host_audio_queue */
@@ -197,13 +206,37 @@ typedef struct n64_runtime_perf {
     int rewind;               /* rewind captures on */
     int cpu;                  /* the host core the loop ran on at the end (-1: unknown) */
     long cpu_khz;             /* that core's scaling_cur_freq (0: unreadable) */
+    /* The detail line (n64_runtime_perf_detail_format). Pictures: n64_display calls (a new picture made and shown);
+     * unchanged: VIs whose picture had not changed since the last one shown (nothing made nor uploaded, the window's
+     * texture shown again); skipped: new pictures frame skip dropped. */
+    uint64_t pictures, unchanged, skipped;
+    uint64_t vi_origin_changes;   /* the game's buffer swaps (n64_guest_activity) */
+    uint64_t scanouts;            /* the Vulkan RDP's upscaled scanouts */
+    uint64_t scanouts_early;      /* of those, started at the VI_ORIGIN change (n64_rdp_scanout_prefetch) */
+    uint64_t queue_waits;         /* times the emulation thread found the Vulkan RDP's command ring full */
+    uint64_t stalled_compiles;    /* "Stalled compile" pipelines (5 ms or more) */
+    double stalled_compile_ms;
+    /* The deferred DP interrupt (n64_core.h n64_set_rdp_defer): SYNC_FULLs deferred, completed at once, completed
+     * before the deadline (save states), backoffs; deadlines where the GPU was still drawing, the wait there (ms). */
+    uint64_t dp_deferred, dp_now, dp_early, dp_backoffs, dp_waits;
+    double dp_wait_ms;
+    /* The worst host frame's own breakdown (ms): n64_run_frame (core), n64_display (vi), present, audio, the rest;
+     * and the RDP's waits inside it (queue and sync inside core or vi, scanout inside vi). */
+    double worst_core_ms, worst_vi_ms, worst_present_ms, worst_audio_ms, worst_other_ms;
+    double worst_queue_ms, worst_sync_ms, worst_scanout_ms, worst_deadline_ms;
 } n64_runtime_perf;
-/* The line's text after "n64: perf ": "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3
+/* The line's text after "n64: perf ": "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5,
+ * scanout 0.5) sched 0.3
  * vi 1.8 present 0.9 audio 0.1 idle 0.0 other 0.2 ms/frame; worst 41 ms, 212 > 16.7 ms, 30 > 33.4 ms of 150 frames;
  * rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k interp instr/frame, 12 rehashes,
  * 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ 1.90 GHz" ("no pack", "rdp software, 2 threads",
  * "core ?" / "core 6" when unknown). Returns what snprintf returns. */
 int n64_runtime_perf_format(const n64_runtime_perf *p, char *out, size_t n);
+/* The detail line's text after "n64: perf detail ", logged right after the perf line: "500 VIs, 167 pictures (16.7/s),
+ * 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts (160 early), 40 full rings; DP 160 deferred (0
+ * early, 0 backoffs), 7 at once, 12 waited 3.5 ms (0.02 ms each); 0 stalled compiles (0 ms); worst 40 ms: core 30.1
+ * vi 7.2 present 1.8 audio 0.1 other 0.8 (rdp queue 9.0, sync 8.0, deadline 0.2, scanout 3.0)". */
+int n64_runtime_perf_detail_format(const n64_runtime_perf *p, char *out, size_t n);
 /* The whole-run figures of the last n64_runtime_run (zeroed before the first; tests). */
 void n64_runtime_last_perf(n64_runtime_perf *out);
 

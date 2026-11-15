@@ -157,7 +157,10 @@ typedef struct n64_cpu {
 } n64_cpu;
 
 /* ---- Events ---------------------------------------------------------------------------------------------------- */
-enum { EV_VI, EV_COMPARE, EV_PI, EV_SI, EV_AI, EV_RSP, EV_COUNT };
+/* EV_DP: the DP interrupt of a SYNC_FULL the RDP back end completes later (n64_core.c « Deferred DP interrupt »). It
+ * takes the slot of an event that was never scheduled (EV_RSP), so the machine's layout and its save states are as
+ * before; a state never holds one (n64_state_save completes it first). */
+enum { EV_VI, EV_COMPARE, EV_PI, EV_SI, EV_AI, EV_DP, EV_COUNT };
 #define EV_NEVER UINT64_MAX
 
 /* ---- Joybus / saves -------------------------------------------------------------------------------------------- */
@@ -296,6 +299,47 @@ struct n64_machine {
     uint32_t perf_every;         /* one frame in this many is timed (0: none) */
     uint32_t perf_count;         /* frames since the last timed one */
     n64_perf perf;
+    /* The deferred DP interrupt's policy (n64_core.c « Deferred DP interrupt »): emulated facts only (VI interrupts,
+     * VI_ORIGIN changes, SYNC_FULLs, DP interrupts), so the moment a deferred DP interrupt comes is the same on every
+     * host. Host-side: restarts at reset and state loads. */
+    struct {
+        int mode;                /* N64_DP_DEFER_OFF / _AUTO */
+        uint32_t offset_pm;      /* the deadline after the next VI interrupt, per mille of a VI */
+        uint64_t warm;           /* VI interrupts since reset / state load */
+        uint64_t last_vi;        /* the time (ticks) of the last VI interrupt (0: none yet) */
+        uint32_t vis;            /* VI interrupts since the last VI_ORIGIN change */
+        uint32_t syncs;          /* SYNC_FULLs (defer_dp calls) since then */
+        uint32_t vis_sync;       /* VI interrupts since the last SYNC_FULL */
+        bool raised;             /* a DP interrupt since the last VI_ORIGIN change */
+        bool deferred;           /* a SYNC_FULL since then was deferred */
+        uint32_t streak;         /* pictures in a row that qualify */
+        uint32_t base;           /* the interval of the pictures before deferring started (0: not deferring) */
+        uint64_t backoff_until;  /* warm count before which nothing is deferred (a picture came later) */
+    } dpp;
+    /* The VI's change test (n64_display_changed, n64_vi.c): rcp_gen counts, per page, the rdram_gen bumps that came
+     * from the RCP's bus.wrote (the RDP's drawn rows, SP DMA), whose exact ranges are tested against the picture's
+     * instead (disp_rcp_hits); the rest of rdram_gen (CPU and lifted stores, PI / SI DMA, n64_rdram, state loads,
+     * reset) counts by page. disp: the state at the last n64_display. */
+    uint32_t *rcp_gen;
+    uint64_t disp_rcp_hits;      /* bus.wrote ranges that overlapped [disp.lo, disp.hi) */
+    struct {
+        bool valid;
+        bool cpu_pending;        /* a non-RCP write changed the picture; the upscaled copy follows at the next pass */
+        uint32_t vi[14];
+        uint32_t lo, hi;         /* the RDRAM the VI reads */
+        uint64_t gen;            /* the non-RCP writes into those pages */
+        uint64_t hits;           /* disp_rcp_hits */
+        uint64_t syncs;          /* the RDP's SYNC_FULL count when cpu_pending was set */
+        const char *rdp;         /* the back end's name (a replacement changes the picture's source) */
+        int sscale;
+    } disp;
+    /* The early scanout started at the last VI_ORIGIN change (n64_vi_origin_changed, n64_rdp_scanout_prefetch): the
+     * RDRAM it reads and the non-RCP writes there then (a CPU write since: n64_display forgets it). */
+    struct {
+        bool on;
+        uint32_t lo, hi;
+        uint64_t gen;
+    } pf;
 };
 #define N64_MACHINE_STATE_BYTES offsetof(n64_machine, blocks)
 
@@ -371,6 +415,20 @@ uint32_t n64_cpu_step_handed(n64_machine *m, uint32_t *left, bool *chained);
  * off. True when the instruction at pc must be stepped instead (no block there, or an op that falls back: the machine
  * holds the state in front of it); false when the machine is where step()'s loop would be after the block. */
 bool n64_cpu_run_block(n64_machine *m, uint32_t maxops);
+/* The pages of RDRAM code no valid entry covers, KSEG0 then KSEG1 (n64_recomp.c keeps it): free[i] for i < npages is
+ * the page at 0x80000000 + i * 4 KB, free[npages + i] the one at 0xA0000000 + i * 4 KB; 1: the dispatcher has nothing
+ * to run there but the interpreter. */
+typedef struct n64_blk_region {
+    const uint8_t *free;
+    uint32_t npages;
+} n64_blk_region;
+/* Blocks one after the other from pc as n64_cpu_run's loop runs them (same checks as n64_cpu_run_block), while they
+ * stay in pages rg->free marks: back to the caller at a page it does not mark, and in front of a block reached by a
+ * branch or jump taken that is not marked as recorded (the dispatcher records missed code there, then calls again
+ * with mark: the block at pc is then marked). Returns 0: the machine is where step()'s loop would be (stop_at reached,
+ * an interrupt, a store into the block); 1: the instruction at pc must be stepped (no block, an op that falls back);
+ * 2: stop_at is close, step to it; 3: pc left the marked pages or is a branch target not recorded yet. */
+int n64_cpu_run_region(n64_machine *m, const n64_blk_region *rg, bool mark);
 
 /* ---- Static recompilation (n64_recomp.c) ------------------------------------------------------------------------ */
 /* n64_cpu_run's loop while a table is attached (m->rc). */
@@ -407,12 +465,19 @@ void n64_mi_raise(n64_machine *m, int irq);
 void n64_mi_clear(n64_machine *m, int irq);
 void n64_schedule(n64_machine *m, int ev, uint64_t at);
 
+/* ---- Deferred DP interrupt (n64_core.c) ------------------------------------------------------------------------ */
+void n64_dp_vi(n64_machine *m, uint64_t t); /* a VI interrupt at t */
+void n64_dp_origin(n64_machine *m);         /* VI_ORIGIN changed */
+void n64_dp_complete_now(n64_machine *m);   /* a pending deferred DP interrupt completes now (save states) */
+void n64_dp_state_loaded(n64_machine *m);   /* the policy starts again */
+
 /* ---- Video / audio (n64_io.c) ---------------------------------------------------------------------------------- */
 void n64_vi_reset(n64_machine *m);
 uint32_t n64_vi_read(n64_machine *m, uint32_t reg);
 void n64_vi_write(n64_machine *m, uint32_t reg, uint32_t v);
 void n64_vi_event(n64_machine *m);
 void n64_vi_free(n64_machine *m); /* n64_vi.c */
+void n64_vi_origin_changed(n64_machine *m); /* n64_vi.c: VI_ORIGIN has a new value (the early scanout) */
 void n64_ai_reset(n64_machine *m);
 uint32_t n64_ai_read(n64_machine *m, uint32_t reg);
 void n64_ai_write(n64_machine *m, uint32_t reg, uint32_t v);

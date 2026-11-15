@@ -554,7 +554,9 @@ int n64_pack_save_missed(n64_machine *m, const char *path)
         fprintf(stderr, "n64: cannot write the discovered code to %s: %s\n", path, strerror(errno));
         return -1;
     }
-    printf("n64: code at %zu address(es) the pack did not cover, %d new record(s), in %s\n", total, added, path);
-    fflush(stdout);
+    if (added > 0) { /* saved at every pause and every few minutes: quiet when nothing is new */
+        printf("n64: code at %zu address(es) the pack did not cover, %d new record(s), in %s\n", total, added, path);
+        fflush(stdout);
+    }
     return added;
 }

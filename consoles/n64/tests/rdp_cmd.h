@@ -317,7 +317,7 @@ static inline void rig_open(rdp_rig *g)
 {
     g->ram = calloc(RAM_SIZE, 1);
     g->irqs = 0;
-    g->dp = n64_rdp_create((n64_rcp_bus){ g->ram, RAM_SIZE, rig_raise, rig_clear, g, NULL });
+    g->dp = n64_rdp_create((n64_rcp_bus){ g->ram, RAM_SIZE, rig_raise, rig_clear, g, NULL, NULL });
 }
 static inline void rig_close(rdp_rig *g)
 {

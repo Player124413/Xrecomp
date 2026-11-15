@@ -156,6 +156,13 @@ final class TouchPad {
     private final Map<Integer, float[]> pointers = new HashMap<>();   // id -> { x, y }
     private final Map<Integer, Control> captured = new HashMap<>();   // id -> the stick or D-pad it landed on
     private float width, height;
+    /**
+     * Whether a layout that leaves no primary control the fingers can reach ({@link #playable}) falls back to the
+     * defaults (the live pad, XBA-212); off in the editor, which shows what the player made so it can be fixed.
+     */
+    boolean fallBackWhenUnplayable = true;
+    /** Set when the player's layout was set aside for the defaults (not playable); null otherwise. */
+    String fellBack;
 
     TouchPad() {
         this(Layout.XBOX);
@@ -312,6 +319,42 @@ final class TouchPad {
             c.hidden = t.hidden;
             clamp(c);
         }
+        fellBack = null;
+        if (fallBackWhenUnplayable && !custom.isEmpty() && !playable()) {
+            String why = "the layout leaves no " + (directionReachable() ? "face button" : "D-pad or stick")
+                         + " to press";
+            custom = new TouchLayout();
+            layout(width, height, scale);   // the defaults (custom is empty now: no recursion past this)
+            fellBack = why;
+        }
+    }
+
+    /**
+     * Whether the pad can be played (XBA-212): at least one direction control (the D-pad or a stick) and one face
+     * button the fingers can reach: shown, on the screen, and the control a finger on its centre lands on (not under
+     * another one).
+     */
+    boolean playable() {
+        return directionReachable() && faceReachable();
+    }
+
+    private boolean directionReachable() {
+        return reachable(DPAD) || reachable(LSTICK) || reachable(RSTICK);
+    }
+
+    private boolean faceReachable() {
+        return reachable(A) || reachable(B) || reachable(X) || reachable(Y);
+    }
+
+    private boolean reachable(int id) {
+        if (!has(id))
+            return false;
+        Control c = control(id);
+        if (c.hidden || !(c.r > 0) || Float.isNaN(c.cx) || Float.isNaN(c.cy))
+            return false;
+        if (c.cx < 0 || c.cy < 0 || c.cx > width || c.cy > height)
+            return false;
+        return at(c.cx, c.cy, true) == c;
     }
 
     /** Resizes one control to size times its default (clamped to TouchLayout's range), kept on screen. */

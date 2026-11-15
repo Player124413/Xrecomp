@@ -116,6 +116,11 @@ if(TARGET n64_rdp AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/n64_rdp.c)
         add_test(NAME n64_rdp_vulkan_bad_driver COMMAND n64_rdp_test)
         set_tests_properties(n64_rdp_vulkan_bad_driver PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
                              ENVIRONMENT "RECOMP_N64_RDP=vulkan;RECOMP_VK_DRIVER_DIR=${CMAKE_CURRENT_BINARY_DIR}/vk_drivers/none/;RECOMP_VK_DRIVER_LIB=vulkan.none.so")
+        # The pipeline cache (n64_vk_cache.h): the first device writes pipelines-<uuid>.bin, every later one (a device
+        # per test case) starts from it ("pipeline cache loaded" in the log); the tests must pass the same.
+        add_test(NAME n64_rdp_vulkan_cache COMMAND n64_rdp_test)
+        set_tests_properties(n64_rdp_vulkan_cache PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800
+                             ENVIRONMENT "RECOMP_N64_RDP=vulkan;RECOMP_VK_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/vk_cache/system")
     endif()
     add_executable(n64_rdp_bench bench_rdp.c)
     target_link_libraries(n64_rdp_bench PRIVATE n64_rdp m)
@@ -146,7 +151,7 @@ endif()
 
 # The custom Vulkan driver selection of the N64 RDP (n64_vk_driver.h): RECOMP_VK_*, the trial marker, last_start. Plain
 # C, no Vulkan: built in every configuration.
-add_executable(n64_vk_driver_test test_vk_driver.c ../runtime/n64_vk_driver.c)
+add_executable(n64_vk_driver_test test_vk_driver.c ../runtime/n64_vk_driver.c ../runtime/n64_vk_cache.c)
 target_include_directories(n64_vk_driver_test PRIVATE ../runtime)
 target_link_libraries(n64_vk_driver_test PRIVATE ${CMAKE_DL_LIBS})
 target_compile_options(n64_vk_driver_test PRIVATE -Wall -Wextra)

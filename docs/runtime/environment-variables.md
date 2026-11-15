@@ -367,6 +367,7 @@ See [consoles/README.md](../../consoles/README.md) (N64 RDP) and `consoles/n64/r
 | `RECOMP_VK_DRIVER_ID=<id>` | the directory's last component | The driver's id, for the log, the trial marker and `last_start`. | `n64_vk_driver.c` |
 | `RECOMP_VK_HOOK_DIR=<dir>` | the directory `libmain.so` was loaded from | The app's native library directory (`ApplicationInfo.nativeLibraryDir`), where adrenotools' hook libraries are. | `n64_vk_driver.c` |
 | `RECOMP_VK_DRIVER=system` | unset | Forces the system driver whatever the others say. | `n64_vk_driver.c` |
+| `RECOMP_VK_CACHE_DIR=<dir>` | unset (nothing kept) | Where the Vulkan RDP keeps compiled shaders between starts (created when missing): `pipelines-<pipelineCacheUUID>.bin`, the VkPipelineCache (read before the start-up check; written when it grew, after the check, every 10 s, at pause and at exit; a truncated or foreign file is ignored and replaced), and `mesa/`, Mesa's disk cache (`MESA_SHADER_CACHE_DIR` is set to it unless already set). The app sets `<cache>/vk_cache/<driver id or system>/` for every N64 game. | `consoles/n64/runtime/n64_vk_cache.c` |
 
 Files next to the drivers (written only when the driver directory's parent is named `vk_drivers`):
 `vk_drivers/trying` holds the id while the driver is being opened and checked; found at the next start with the same
@@ -479,7 +480,8 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_PLAYERS=1..4` | 1 | With 2 or more, host pad N drives controller N; otherwise every pad drives controller 1 (`--players`). | `n64_runtime.c` |
 | `RECOMP_N64_STICK_RANGE=N` | 80 | The stick's value at full travel on one axis (the diagonals follow the octagonal gate). | `n64_runtime.c` |
 | `RECOMP_N64_DEADZONE=0..90` | 8 | The stick's radial dead zone, in percent. | `n64_runtime.c` |
-| `RECOMP_N64_FRAMESKIP=auto\|0\|N` | auto | `auto` skips the picture of frames the host is late for, `0` never, `N` shows one frame in N + 1 (`--frameskip`). A skipped frame still runs and makes its sound. | `n64_runtime.c` |
+| `RECOMP_N64_FRAMESKIP=auto\|0\|N` | auto | `auto` skips the picture of frames the host is late for (new pictures only, never two in a row), `0` never, `N` shows one new picture in N + 1 (`--frameskip`). A skipped frame still runs and makes its sound. | `n64_runtime.c` |
+| `RECOMP_N64_PRESENT_ALWAYS=1` | 0 | Make, convert and upload the VI's picture on every VI, as before; by default only when it changed (`n64_display_changed`), the window's texture drawn again otherwise. | `n64_runtime.c` |
 | `RECOMP_N64_RDP=vulkan\|software\|auto` | auto: Vulkan on Android (when built in), software elsewhere | The RDP back end (`vk` / `gpu`, `sw` / `cpu` too). The Vulkan one falls back to the software one when it fails its check. | `n64_rdp_select.c` |
 | `RECOMP_N64_UPSCALE=1\|2\|4\|8` | `RECOMP_UPSCALE`, else 1 | The N64's internal resolution (XBA-185): the Vulkan RDP draws at that multiple and its VI scans the picture out at it (1280 x 480 at 2x); RDRAM keeps the 1x picture. Lowered (logged) when the device's storage buffer range or memory cannot hold it (128 MB range: 4x at most). Other numbers take the power of two below. The software RDP stays 1x (logged). | `n64_rdp_select.c`, `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_DOWNSCALE=0..3` | as many as keep the picture at most 2560 wide (8x: 1) | Halvings of the upscaled scanout (filtered: super-sampling), to keep the readback small. | `n64_rdp_vk.cpp` |
@@ -487,6 +489,10 @@ apply to them too; the pad mappings are under [Input](#input).
 | `RECOMP_N64_UPSCALE_NATIVE_LOD=1` | off | Computes texture LOD as at 1x when upscaled (games that pick textures through LOD). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_UPSCALE_SSREADBACK=1` | off | The RDRAM copy the game reads is the upscaled picture averaged down, not the 1x one (not bit-exact). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_THREADS=N` | 2 on Android, else `XBR_N64_RDP_THREADS`, else 1 | The software RDP's renderer threads (`--rdp-threads`): they draw while the emulation thread runs on, the result is the same for any count. | `n64_runtime.c`, `n64_rdp.c` |
+| `RECOMP_N64_RDP_DEFER=0\|auto\|<percent>` | auto | The Vulkan RDP's deferred DP interrupt (`n64_core.c` « Deferred DP interrupt »): for a game that shows a picture every 2 VIs or more with one SYNC_FULL each, the DP interrupt comes after the next VI interrupt and the GPU is waited for there, not inside the frame that queued the work; with it, the upscaled scanout starts at the VI_ORIGIN change. `0` off (both), `auto` the deadline 1/16 VI after the VI interrupt, a number that offset in percent of a VI (1..100). | `n64_core.c` |
+| `RECOMP_N64_PRESENT_DIRECT=0` | on | The upscaled picture through the XRGB buffer and the window's screenshot copy as before, instead of straight from the Vulkan RDP's scanout buffer to the texture (`n64_display_rgba`). | `n64_runtime.c` |
+| `RECOMP_N64_SCANOUT_EARLY=0` | on | The early upscaled scanout alone off (`n64_rdp_scanout_prefetch`), to compare. | `n64_vi.c` |
+| `RECOMP_N64_RDP_DEFER_SOFTWARE=1` | 0 | Tests: the software RDP's DP interrupt goes through the deferral policy too (drawn at once, only the interrupt held). | `n64_rdp_select.c` |
 | `RECOMP_N64_RDP_CHECK=0` | on | Skips the Vulkan RDP's start-up draw check (only a pipeline failure then falls back). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_RDP_UBERSHADER=1` | off on Qualcomm's driver | Uses the Vulkan RDP's ubershader on Qualcomm's proprietary driver anyway (games come out black there, so it goes software). | `n64_rdp_vk.cpp` |
 | `RECOMP_N64_TTY=1` | off | Prints the IS-Viewer text a game writes (`--tty`). | `n64_runtime.c` |

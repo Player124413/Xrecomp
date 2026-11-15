@@ -445,6 +445,28 @@ public class VkDriversTest {
         }
     }
 
+    @Test
+    public void cacheEnvIsPerDriverUnderTheCacheDir() throws IOException {
+        File cache = tmp.newFolder("cache");
+        VkDrivers.Driver d = vk.install(file(zip(good())), null);
+        String[] custom = VkDrivers.cacheEnv(d, cache);
+        assertEquals("RECOMP_VK_CACHE_DIR", custom[0]);
+        assertEquals(cache.getAbsolutePath() + "/vk_cache/" + d.id + "/", custom[1]);
+        String[] system = VkDrivers.cacheEnv(null, cache);
+        assertEquals("RECOMP_VK_CACHE_DIR", system[0]);
+        assertEquals(cache.getAbsolutePath() + "/vk_cache/system/", system[1]);
+        assertFalse(custom[1].equals(system[1]));
+        // not an N64 game: unset, so a previous game's value does not stay in the process
+        String[] off = VkDrivers.cacheEnv(d, null);
+        assertEquals("RECOMP_VK_CACHE_DIR", off[0]);
+        assertNull(off[1]);
+        // the runtime creates the directory itself: nothing is made here
+        assertFalse(new File(cache, "vk_cache").exists());
+        // never one of runEnv's four (those are unset without a custom driver; this one is set for the system one)
+        for (String[] kv : VkDrivers.runEnv(d, "/data/app/x/lib/arm64"))
+            assertFalse(kv[0].equals("RECOMP_VK_CACHE_DIR"));
+    }
+
     // ---- A game's own app ------------------------------------------------------------------------------------------
 
     @Test

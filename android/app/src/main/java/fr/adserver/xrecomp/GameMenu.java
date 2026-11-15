@@ -48,8 +48,10 @@ import java.util.function.LongSupplier;
  *       it reaches the game.</li>
  *   <li>Items: Resume, for a GBA, PS1 or N64 game Save state, Load state (four slots each) and Fast-forward
  *       (XBA-182, XBA-183) and Cheats (XBA-197: each code On / Off, Add a code, Delete a code; written at once),
- *       Settings (performance overlay, game volume, bottom screen: all live; this game's language,
- *       widescreen and 480p, its picture shader (XBA-206): next start; Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
+ *       Settings (performance overlay, game volume, bottom screen, a console game's scale and filter
+ *       and the picture shader (XBA-206): all live; this game's language, widescreen and 480p, internal resolution,
+ *       Vulkan driver and most Game settings: read at the start, so « Restart to apply » shows at the top once one
+ *       of them changed (a second press restarts the game in a new process); Share log), Controls, Screenshot, Back to launcher (the game stays alive and held in the
  *       background; « Back to the home screen » in a game's own app, which has no launcher to show), Quit game (a second press within {@link #QUIT_ARM_MS} confirms). The header shows the game's
  *       title and « Paused · 0:42 played ».</li>
  * </ul>
@@ -107,6 +109,9 @@ final class GameMenu {
 
         /** Opens the touch layout editor over the held game (XBA-207); the menu has closed. */
         default void editTouchLayout() {}
+
+        /** The menu opens (XBA-212: a touch layout editor left open over the game is cancelled first). */
+        default void menuOpened() {}
 
         /** The launched GBA, PS1 or N64 game's mapping (ConsoleControls.effective), or null for an Xbox game. */
         default ConsolePadMap consoleMap() {
@@ -171,6 +176,18 @@ final class GameMenu {
          * saved.
          */
         default void addCheat(Console console, String key, java.util.function.Consumer<String> added) {}
+
+        /**
+         * The picture changed (its scale, filter or shader: {@link ConsoleVideo#LIVE_KEYS}), taken by the game at
+         * once (MenuNative.nativeSetPicture).
+         */
+        default void setPicture(ConsoleVideo.Picture p) {}
+
+        /**
+         * « Restart to apply »: the game starts again in a new process (the launcher ends this one, as after the
+         * title's own quick reboot), so the settings it reads once at its start take effect.
+         */
+        default void restartGame() {}
     }
 
     /** The automatic slot (« Where you left off ») and the kinds of nativeStateEvent. */
@@ -200,7 +217,7 @@ final class GameMenu {
     enum Item { RESUME, SETTINGS, CONTROLS, SCREENSHOT, SHARE_LOG, LAUNCHER, QUIT, PERF, VOLUME, BOTTOM, LANGUAGE,
                 WIDESCREEN, P480, TOUCH, BACK, DISC, SCALE, FILTER, UPSCALE, VK_DRIVER, STATE_SAVE, STATE_LOAD,
                 FAST_FORWARD, AUTO_RESUME, GAME_SETTINGS, GS_RESET, CHEATS, CHEAT_ADD, CHEAT_DELETE, SHADER,
-                TOUCH_EDIT }
+                TOUCH_EDIT, RESTART }
 
     private final Activity activity;
     private final Host host;
@@ -237,6 +254,11 @@ final class GameMenu {
     private Hotkeys hotkeys;
     private int volume, volumeBeforeMute = 100;
     private ValueAnimator anim;
+    /** The picture the game shows (what it started with, then each live change): a change is sent once. */
+    private ConsoleVideo.Picture livePicture;
+    /** What the game started with of the settings that are not live ({@link #restartSnapshot}). */
+    private String restartBase;
+    private long restartArmedAt = -1;
 
     /** Keys whose down went to the game and that are still held: released in the game when the menu opens. */
     private final Map<Integer, KeyEvent> held = new HashMap<>();
@@ -288,6 +310,7 @@ final class GameMenu {
     };
     private final Runnable flashEnd = this::hideFlash;
     private final Runnable quitDisarm = this::disarmQuit;
+    private final Runnable restartDisarm = this::disarmRestart;
 
     GameMenu(Activity activity, Host host, LongSupplier clock) {
         this.activity = activity;
@@ -340,7 +363,17 @@ final class GameMenu {
         LinearLayout.LayoutParams plp = lpTop(-1, -2, Theme.S5);
         col.addView(pageV, plp);
 
-        scroll = new ScrollView(activity);
+        // The rows overflow sideways (their focus plates reach into the margin) but never up or down: a scrolled list
+        // stays between the page title and the hints instead of running over them.
+        scroll = new ScrollView(activity) {
+            @Override
+            protected void dispatchDraw(android.graphics.Canvas c) {
+                c.save();
+                c.clipRect(-getLeft(), getScrollY(), getWidth() + Theme.S6, getScrollY() + getHeight());
+                super.dispatchDraw(c);
+                c.restore();
+            }
+        };
         scroll.setVerticalScrollBarEnabled(false);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setClipChildren(false);
@@ -393,6 +426,8 @@ final class GameMenu {
                 feedback.play(UiFeedback.Cue.MOVE, now);
             if (quitArmedAt >= 0 && now != rows.get(Item.QUIT))
                 disarmQuit();
+            if (restartArmedAt >= 0 && now != rows.get(Item.RESTART))
+                disarmRestart();
         });
 
         perfOn = GameStore.perfOverlay(activity);
@@ -401,6 +436,8 @@ final class GameMenu {
             volumeBeforeMute = volume;
         host.setVolume(volume);
         updatePerf();
+        livePicture = currentPicture();
+        restartBase = restartSnapshot();
     }
 
     GameMenu(Activity activity, Host host) {
@@ -447,6 +484,7 @@ final class GameMenu {
 
     void onStart() {
         started = true;
+        syncPicture("start");   // back from the launcher, where its Game settings may have changed the picture
         handler.removeCallbacks(perfTick);
         if (perfOn)
             handler.post(perfTick);
@@ -499,10 +537,12 @@ final class GameMenu {
         openedAt = clock.getAsLong();
         downWhileOpen.clear();
         Log.i(LauncherActivity.TAG, "shell: menu open (" + why + ")");
+        host.menuOpened();
         releaseGameInput();
         host.hold(true);
         launcherPending = false;
         disarmQuit();
+        syncPicture("open");   // changed in the launcher's Game settings while the game waited: shown now
         flashBox.setVisibility(View.GONE);
         titleV.setText(gameTitle());
         updateSession();
@@ -899,6 +939,7 @@ final class GameMenu {
         list.removeAllViews();
         rows.clear();
         disarmQuit();
+        disarmRestart();
         setBackHint(p == Page.MAIN ? R.string.MENU_RESUME : R.string.MENU_HINT_BACK);
         switch (p) {
         case MAIN:
@@ -928,6 +969,7 @@ final class GameMenu {
         case SETTINGS: {
             pageV.setText(s(R.string.MENU_SETTINGS));
             pageV.setVisibility(View.VISIBLE);
+            restartRow();
             Widgets.MenuRow r = row(Item.PERF, s(R.string.MENU_PERF));
             r.setChoices(new String[] { s(R.string.MENU_ON), s(R.string.MENU_OFF) });
             r.cycler = dir -> setPerf(!perfOn);
@@ -951,7 +993,7 @@ final class GameMenu {
                 row(Item.TOUCH_EDIT, s(R.string.MENU_TOUCH_EDIT));   // XBA-207: this game's layout, live
             }
             if (titleId() != null && Console.ofKey(titleId()) != Console.XBOX) {
-                // XBA-181: a GBA, PS1 or N64 game's own scale and filter (ConsoleVideo), from its next start.
+                // XBA-181: a GBA, PS1 or N64 game's own scale and filter (ConsoleVideo), shown at once.
                 r = row(Item.SCALE, s(R.string.MENU_SCALE));
                 r.setChoices(consoleLabels(ConsoleVideo.Setting.SCALE));
                 r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.SCALE, dir);
@@ -959,7 +1001,7 @@ final class GameMenu {
                 r.setChoices(consoleLabels(ConsoleVideo.Setting.FILTER));
                 r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.FILTER, dir);
                 if (ConsoleVideo.applies(ConsoleVideo.Setting.UPSCALE, Console.ofKey(titleId()))) {
-                    // XBA-184: a PS1 or N64 game's internal resolution, from its next start.
+                    // XBA-184: a PS1 or N64 game's internal resolution, after « Restart to apply ».
                     r = row(Item.UPSCALE, s(R.string.MENU_UPSCALE));
                     r.setChoices(consoleLabels(ConsoleVideo.Setting.UPSCALE));
                     r.cycler = dir -> stepConsoleVideo(ConsoleVideo.Setting.UPSCALE, dir);
@@ -993,7 +1035,7 @@ final class GameMenu {
             }
             if (titleId() != null) {
                 // XBA-206: the picture shader (XBA-195 / XBA-203: every console's window and the Xbox presenter), this
-                // game's own in its GameSettings file, from its next start (the runtime reads RECOMP_SHADER once).
+                // game's own in its GameSettings file, shown at once (MenuNative.nativeSetPicture).
                 RecompConfig.Option sh = shaderOption();
                 if (sh != null)
                     rows.put(Item.SHADER, gameOptionRow(sh, s(R.string.MENU_SHADER)));
@@ -1008,6 +1050,7 @@ final class GameMenu {
         case GAME_SETTINGS:
             pageV.setText(s(R.string.MENU_GAME_SETTINGS));
             pageV.setVisibility(View.VISIBLE);
+            restartRow();
             kvRow(s(R.string.MENU_GS_NEXT_START), "");
             for (RecompConfig.Option o : GameSettings.options(Console.ofKey(titleId()), lsfgBuilt()))
                 gameOptionRow(o, s(o.title));
@@ -1401,6 +1444,15 @@ final class GameMenu {
     }
 
     private void kvRow(String key, String value) {
+        if (value == null || value.isEmpty()) {   // a note alone (Game settings' first line): whole, two lines at most
+            TextView k = Theme.text(activity, Theme.T_SMALL, Theme.REGULAR, Theme.TEXT_DIM, key);
+            k.setMaxLines(2);
+            k.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            k.setLineSpacing(0, 1.15f);
+            k.setPadding(Theme.ROW_INSET, Theme.S1, Theme.ROW_INSET, Theme.S2);
+            list.addView(k, new LinearLayout.LayoutParams(-1, -2));
+            return;
+        }
         LinearLayout l = new LinearLayout(activity);
         l.setOrientation(LinearLayout.HORIZONTAL);
         l.setGravity(Gravity.CENTER_VERTICAL);
@@ -1518,9 +1570,13 @@ final class GameMenu {
             break;
         case GS_RESET:
             GameSettings.reset(activity.getFilesDir(), titleId());
-            Log.i(LauncherActivity.TAG, "shell: menu: game settings of " + titleId() + " reset to Settings (next start)");
+            Log.i(LauncherActivity.TAG, "shell: menu: game settings of " + titleId() + " reset to Settings");
+            afterChange();
             showPage(Page.GAME_SETTINGS, Item.GS_RESET);
             flash(s(R.string.GS_RESET_DONE), true);
+            break;
+        case RESTART:
+            restartPressed();
             break;
         case BACK:
             back();
@@ -1624,7 +1680,8 @@ final class GameMenu {
 
     /**
      * XBA-188: one option of Game settings (GameSettings): « As in Settings (<value>) », then each choice, saved at
-     * once for the game's next start; the « This game » badge when it differs from Settings'.
+     * once; a picture option (ConsoleVideo.LIVE_KEYS) is shown at once, any other waits for « Restart to apply »;
+     * the « This game » badge when it differs from Settings'.
      */
     private Widgets.MenuRow gameOptionRow(RecompConfig.Option o, String title) {
         RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(activity));
@@ -1653,11 +1710,124 @@ final class GameMenu {
             feedback.play(UiFeedback.Cue.MOVE, r);
             Log.i(LauncherActivity.TAG, "shell: menu: " + String.join("+", o.keys) + " " + (pos == 0 ? "as in Settings"
                                         : activity.getResources().getResourceEntryName(o.choices[pos - 1].label))
-                                        + " for " + titleId() + " (next start)");
+                                        + " for " + titleId() + (ConsoleVideo.isLive(o) ? " (live)" : " (restart)"));
+            afterChange();
         };
         r.setOnClickListener(v -> r.cycler.step(1));
         list.addView(r, new LinearLayout.LayoutParams(-1, ROW_H));
         return r;
+    }
+
+    // ---- Live picture, Restart to apply -------------------------------------------------------------------------
+
+    /** After a setting changed: the picture's keys go to the game at once, the others show « Restart to apply ». */
+    private void afterChange() {
+        syncPicture("menu");
+        updateRestart();
+    }
+
+    /** The picture the game's settings give now (ConsoleVideo.livePicture). */
+    private ConsoleVideo.Picture currentPicture() {
+        String key = titleId();
+        Console con = key == null ? Console.XBOX : Console.ofKey(key);
+        return ConsoleVideo.livePicture(con, RecompConfig.load(GameStore.externalFilesDir(activity)),
+                                        key == null ? null : GameSettings.load(activity, key));
+    }
+
+    /** Sends the picture to the game when it is not the one it shows. */
+    private void syncPicture(String why) {
+        ConsoleVideo.Picture p = currentPicture();
+        if (p.equals(livePicture))
+            return;
+        livePicture = p;
+        Log.i(LauncherActivity.TAG, "shell: menu: picture applied live (" + why + "): " + p);
+        host.setPicture(p);
+    }
+
+    /**
+     * What the game read at its start of everything that is not live: its environment (GameSettings.runEnv) but the
+     * picture keys, an unset key as recomp.cfg has it (the runtime reads that file at its start; an empty value and
+     * none are the same default), and an N64 game's
+     * Vulkan driver. « Restart to apply » shows while it differs from the one taken when the game started.
+     */
+    private String restartSnapshot() {
+        String key = titleId();
+        if (key == null)
+            return "";
+        Console con = Console.ofKey(key);
+        RecompConfig cfg = RecompConfig.load(GameStore.externalFilesDir(activity));
+        RecompConfig game = GameSettings.load(activity, key);
+        GameSettings.Env env = GameSettings.runEnv(con, cfg, game, Locale.getDefault(), lsfgBuilt());
+        StringBuilder b = new StringBuilder();
+        for (String[] kv : env.vars) {
+            if (ConsoleVideo.isLive(kv[0]) || kv[0].equals(GameSettings.SKIP_ENV))
+                continue;
+            // Unset: the game's « default », else recomp.cfg's line; « » and none are both the runtime's default.
+            String v = kv[1] != null ? kv[1] : game.has(kv[0]) || cfg == null ? null : cfg.get(kv[0]);
+            if (v != null && v.trim().isEmpty())
+                v = null;
+            b.append(kv[0]).append('=').append(v).append('\n');
+        }
+        if (vkDriverShown())
+            b.append("vk=").append(VkDrivers.of(activity).gameChoice(key));
+        return b.toString();
+    }
+
+    /** True while a setting the game reads at its start differs from what it started with. */
+    boolean restartPending() {
+        return restartBase != null && !restartBase.equals(restartSnapshot());
+    }
+
+    /** « Restart to apply », at the top of Settings and Game settings, shown while a change waits for it. */
+    private void restartRow() {
+        if (titleId() == null)
+            return;
+        Widgets.MenuRow r = row(Item.RESTART, s(R.string.MENU_RESTART_APPLY));
+        r.setSubtitle(s(R.string.MENU_RESTART_APPLY_SUB));
+        r.setVisibility(restartPending() ? View.VISIBLE : View.GONE);
+    }
+
+    private void updateRestart() {
+        Widgets.MenuRow r = rows.get(Item.RESTART);
+        if (r == null)
+            return;
+        boolean on = restartPending();
+        if (!on)
+            disarmRestart();
+        r.setVisibility(on ? View.VISIBLE : View.GONE);
+    }
+
+    /** A second press within {@link #QUIT_ARM_MS} restarts (the automatic slot saved first when resuming applies). */
+    private void restartPressed() {
+        long now = clock.getAsLong();
+        if (restartArmedAt >= 0 && now - restartArmedAt <= QUIT_ARM_MS) {
+            Log.i(LauncherActivity.TAG, "shell: menu: restart to apply (confirmed)");
+            host.releaseOverlay();
+            autoSave("restart");
+            host.restartGame();
+            return;
+        }
+        restartArmedAt = now;
+        Widgets.MenuRow r = rows.get(Item.RESTART);
+        if (r != null) {
+            r.setTitle(s(R.string.MENU_RESTART_CONFIRM));
+            r.setSubtitle(s(autoResumes() ? R.string.MENU_RESTART_KEPT : R.string.MENU_QUIT_CONFIRM_SUB));
+        }
+        feedback.play(UiFeedback.Cue.ERROR, r);
+        handler.removeCallbacks(restartDisarm);
+        handler.postDelayed(restartDisarm, QUIT_ARM_MS);
+    }
+
+    private void disarmRestart() {
+        if (restartArmedAt < 0)
+            return;
+        restartArmedAt = -1;
+        handler.removeCallbacks(restartDisarm);
+        Widgets.MenuRow r = rows.get(Item.RESTART);
+        if (r != null) {
+            r.setTitle(s(R.string.MENU_RESTART_APPLY));
+            r.setSubtitle(s(R.string.MENU_RESTART_APPLY_SUB));
+        }
     }
 
     /** Settings' « Picture shader » option (RECOMP_SHADER), or null. */
@@ -1688,13 +1858,17 @@ final class GameMenu {
         return out;
     }
 
-    /** A console game's scale or filter (XBA-181): remembered per game, applied by ShellActivity at its next start. */
+    /**
+     * A console game's scale, filter (XBA-181) or internal resolution (XBA-184): remembered per game; scale and filter
+     * shown at once, the resolution after « Restart to apply ».
+     */
     private void stepConsoleVideo(ConsoleVideo.Setting which, int dir) {
         String v = ConsoleVideo.next(which, ConsoleVideo.gameChoice(activity, titleId(), which), dir);
         ConsoleVideo.setGameChoice(activity, titleId(), which, v);
         Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " " + (v == null ? "as in Settings" : v)
-                                    + " for " + titleId() + " (next start)");
+                                    + " for " + titleId() + (ConsoleVideo.isLive(which.env) ? " (live)" : " (restart)"));
         updateValues();
+        afterChange();
     }
 
     /** An N64 game in XRecomp (a game's own app follows XRecomp's choice, VkDriverShare: no row there). */
@@ -1702,12 +1876,13 @@ final class GameMenu {
         return titleId() != null && Console.ofKey(titleId()) == Console.N64 && TitleApp.ownTitleId(activity) == null;
     }
 
-    /** This N64 game's Vulkan driver (VkDrivers.setGameChoice): remembered per game, applied at its next start. */
+    /** This N64 game's Vulkan driver (VkDrivers.setGameChoice): remembered per game, after « Restart to apply ». */
     private void stepVkDriver(int dir) {
         String v = VkDriverStore.stepGameChoice(VkDrivers.of(activity), titleId(), dir);
         Log.i(LauncherActivity.TAG, "shell: menu: vulkan driver " + (v == null ? "as in Settings" : v)
-                                    + " for " + titleId() + " (next start)");
+                                    + " for " + titleId() + " (restart)");
         updateValues();
+        afterChange();
     }
 
     /** The Vulkan driver row's value: the game's choice, and a short warning when that driver went wrong last time. */
@@ -1729,25 +1904,27 @@ final class GameMenu {
         return 0;
     }
 
-    /** This game's language (XBA-77): remembered per title ID, applied by ShellActivity at the next start. */
+    /** This game's language (XBA-77): remembered per title ID, after « Restart to apply » (read at the start). */
     private void stepLanguage(int dir) {
         int n = GameLanguage.MENU_ORDER.length + 1;
         int pos = ((languagePos() + dir) % n + n) % n;
         String code = pos == 0 ? null : GameLanguage.CODES[GameLanguage.MENU_ORDER[pos - 1]];
         GameLanguage.setTitleChoice(activity, titleId(), code);
         Log.i(LauncherActivity.TAG, "shell: menu: language " + (code == null ? "as in Settings" : code)
-                                    + " for " + titleId() + " (next start)");
+                                    + " for " + titleId() + " (restart)");
         updateValues();
+        afterChange();
     }
 
-    /** This game's widescreen or 480p (XBA-134): remembered per title ID, applied by ShellActivity at next start. */
+    /** This game's widescreen or 480p (XBA-134): remembered per title ID, after « Restart to apply ». */
     private void stepVideo(GameVideo.Setting which, int dir) {
         Boolean on = GameVideo.next(GameVideo.titleChoice(activity, titleId(), which), dir);
         GameVideo.setTitleChoice(activity, titleId(), which, on);
         Log.i(LauncherActivity.TAG, "shell: menu: " + which.env + " "
                                     + (on == null ? "as in Settings" : on ? "on" : "off")
-                                    + " for " + titleId() + " (next start)");
+                                    + " for " + titleId() + " (restart)");
         updateValues();
+        afterChange();
     }
 
     private String videoLabel(GameVideo.Setting which) {

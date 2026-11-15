@@ -11,15 +11,20 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
 import java.io.File;
 import java.util.List;
 
 /**
- * The library screen's model (plain JUnit): records joined with the scan index, one entry per title ID with its chip,
+ * The library screen's model (Robolectric for org.json, which Pack reads): records joined with the scan index, one entry per title ID with its chip,
  * the grid's order, games that leave it, the record made for a game seen in the folder only, the pack hash rule.
  * Synthetic XBEs only (TestSupport.xbe).
  */
+@RunWith(RobolectricTestRunner.class)
+@Config(sdk = 34)
 public class LibraryScreenTest {
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
@@ -289,6 +294,96 @@ public class LibraryScreenTest {
         x.items.remove(rom);
         assertEquals(3, LibraryScreen.entries(files, g, x, env).size());   // Fable, the N64 and PS1 games
         assertEquals(GameState.Chip.GONE, LibraryScreen.entry(files, r.titleId, g, x, env).chip);
+    }
+
+    private static final String TK_OLD = "99a89f952e3aea1439384c960410ba6df759b4948967973b749ec2182a04b40f",
+            TK_APP = "6cc36f77a67aa0999511c4e8349eca5a60664b061fbcd9b4159eea3b1e5ed5d0";
+
+    /** A valid pack for a console game (packs/&lt;console&gt;-&lt;key&gt;), lifted by toolkit (null: it does not say). */
+    private void consolePack(Console c, String key, String toolkit) throws Exception {
+        File dir = Pack.packDir(files, c, key);
+        TestSupport.write(new File(dir, "libtitle.so"), new byte[8]);
+        org.json.JSONObject o = new org.json.JSONObject();
+        o.put("format", 1);
+        o.put("console", c.id);
+        o.put("title_key", key);
+        o.put("abi", "arm64-v8a");
+        o.put("shell_abi", Pack.SHELL_ABI);
+        o.put("lib", "libtitle.so");
+        o.put("lib_size", 8);
+        if (toolkit != null)
+            o.put("toolkit_sha256", toolkit);
+        TestSupport.write(new File(dir, "pack.json"), o.toString());
+    }
+
+    /**
+     * The card of a Ready game says how prepared it is: Prepared (OK), Prepared · out of date (WARN: its pack.json's
+     * toolkit_sha256 is not this APK's, Pack.toolkitSha256OfKey for a console game), Not prepared (neutral) for a
+     * console game without a pack; a plain « Ready », not shown, without the toolchain.
+     */
+    @Test
+    public void preparedOnTheCard() throws Exception {
+        LibraryIndex x = new LibraryIndex();
+        x.items.add(romItem(Console.GBA, "AXVE-1A2B3C4D", "file:/sdcard/gba/Sample.gba", "Sample"));
+        x.items.add(romItem(Console.N64, "NSME-635A2BFF", "file:/sdcard/n64/Race.z64", "Race"));
+        x.items.add(romItem(Console.PS1, "SLUS-00594", "file:/sdcard/ps1/Space Race.cue", "Space Race"));
+        LibraryScreen.Env env = env();
+        env.toolchain = true;
+        env.toolkit = TK_APP;
+        Library.Games g = new Library.Games();
+        String[][] games = {{"gba", "AXVE-1A2B3C4D"}, {"n64", "NSME-635A2BFF"}, {"ps1", "SLUS-00594"}};
+        for (String[] k : games) {
+            Console c = Console.ofKey(k[0] + "-" + k[1]);
+            String key = k[0] + "-" + k[1];
+            LibraryScreen.Entry e = LibraryScreen.entry(files, key, g, x, env);
+            assertEquals(key, GameState.Chip.READY, e.chip);
+            assertEquals(key, GameState.Prepared.NOT_PREPARED, e.prepared);
+            assertEquals(Theme.TEXT_DIM, LibraryScreen.chipColor(e));
+            assertTrue(LibraryScreen.chipShown(e));
+            assertEquals(R.string.LIB_CHIP_NOT_PREPARED, LibraryScreen.preparedLabel(e.prepared));
+
+            consolePack(c, k[1], TK_APP);
+            e = LibraryScreen.entry(files, key, g, x, env);
+            assertEquals(key, Pack.Check.VALID, e.facts.pack);
+            assertFalse(e.facts.packOlderToolkit);
+            assertEquals(key, GameState.Prepared.PREPARED, e.prepared);
+            assertEquals(Theme.OK, LibraryScreen.chipColor(e));
+            assertEquals(R.string.LIB_CHIP_PREPARED, LibraryScreen.preparedLabel(e.prepared));
+
+            consolePack(c, k[1], TK_OLD);
+            e = LibraryScreen.entry(files, key, g, x, env);
+            assertTrue(e.facts.packOlderToolkit);
+            assertEquals(key, GameState.Chip.READY, e.chip);
+            assertEquals(key, GameState.Prepared.OUTDATED, e.prepared);
+            assertEquals(Theme.WARN, LibraryScreen.chipColor(e));
+            assertEquals(R.string.LIB_CHIP_OUTDATED, LibraryScreen.preparedLabel(e.prepared));
+
+            consolePack(c, k[1], null);   // from before toolkit_sha256: an older toolkit
+            assertEquals(key, GameState.Prepared.OUTDATED, LibraryScreen.entry(files, key, g, x, env).prepared);
+
+            env.toolkit = "";   // an APK without the digest: nothing to compare, prepared
+            assertEquals(key, GameState.Prepared.PREPARED, LibraryScreen.entry(files, key, g, x, env).prepared);
+            env.toolkit = TK_APP;
+
+            env.toolchain = false;   // no Prepare in this APK: a plain « Ready », not shown
+            e = LibraryScreen.entry(files, key, g, x, env);
+            assertEquals(GameState.Prepared.NONE, e.prepared);
+            assertFalse(LibraryScreen.chipShown(e));
+            env.toolchain = true;
+        }
+
+        // An Xbox title imported with a valid pack: Prepared, or out of date from an older toolkit (it still plays).
+        g.put(record(FABLE, "Fable", new File(tmp.getRoot(), "games/" + FABLE)));
+        TestSupport.writePack(files, FABLE, 64);   // no toolkit_sha256: an older toolkit
+        LibraryScreen.Entry f = LibraryScreen.entry(files, FABLE, g, x, env);
+        assertEquals(GameState.Chip.READY, f.chip);
+        assertEquals(GameState.Prepared.OUTDATED, f.prepared);
+        File pj = new File(Pack.packDir(files, FABLE), "pack.json");
+        TestSupport.write(pj, new org.json.JSONObject(PrepareProtocol.readText(pj, 1 << 16))
+                                  .put("toolkit_sha256", TK_APP).toString());
+        f = LibraryScreen.entry(files, FABLE, g, x, env);
+        assertEquals(GameState.Prepared.PREPARED, f.prepared);
+        assertTrue(LibraryScreen.chipShown(f));
     }
 
     /** A library folder the app cannot read: only its games show « No file access ». */

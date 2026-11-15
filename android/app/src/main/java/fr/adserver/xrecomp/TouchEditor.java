@@ -26,6 +26,11 @@ import java.io.File;
  *
  * <p>Opened from Settings › Controls › « Edit touch layout » over a plain backdrop, and from the in-game menu over the
  * held game, where the saved layout applies to the running game at once.
+ *
+ * <p>XBA-212: it must never pass for the game. An opaque banner across the top (« Editing touch layout », Save,
+ * Cancel) and a dark tint over the held game say what it is; the game's activity cancels it (the old layout kept) when
+ * it goes to the background, when the in-game menu opens or the activity resumes, and on Back / B. A layout that
+ * leaves no D-pad or stick, or no face button, to press is not saved.
  */
 @SuppressLint("ViewConstructor")
 final class TouchEditor extends FrameLayout {
@@ -45,6 +50,12 @@ final class TouchEditor extends FrameLayout {
     private final LinearLayout panel;
     private final TextView status, hide, gridB, scope;
     final TextView save;
+    /** The top banner (XBA-212): what this screen is, Save, Cancel. */
+    final LinearLayout banner;
+    final TextView bannerSave, bannerCancel;
+    private boolean closed;
+    /** The dark tint over the held game (XBA-212: never mistaken for the game). */
+    static final int GAME_TINT = 0xA0000000;
 
     /**
      * @param gameKey  the running game's key (GameSettings), or null from Settings (no « This game only »)
@@ -59,7 +70,7 @@ final class TouchEditor extends FrameLayout {
         this.filesDir = c.getFilesDir();
         android.util.DisplayMetrics dm = c.getResources().getDisplayMetrics();
         k = Math.max(0.5f, Math.min(dm.widthPixels, dm.heightPixels) / 1080f);
-        setBackgroundColor(overGame ? 0x40000000 : Theme.opaque(Theme.BG_BOTTOM));
+        setBackgroundColor(overGame ? GAME_TINT : Theme.opaque(Theme.BG_BOTTOM));
         setClickable(true);
         setFocusable(false);
 
@@ -113,6 +124,26 @@ final class TouchEditor extends FrameLayout {
         panel.addView(row3);
 
         addView(panel, new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+
+        // The banner, centred at the top (clear of the shoulder buttons in the corners): opaque, never the game's.
+        banner = new LinearLayout(c);
+        banner.setOrientation(LinearLayout.HORIZONTAL);
+        banner.setGravity(Gravity.CENTER_VERTICAL);
+        banner.setPadding(px(Theme.S3), px(6), px(Theme.S2), px(6));
+        banner.setBackground(round(Theme.opaque(Theme.PANEL), Theme.RADIUS, Theme.ACCENT | 0xFF000000));
+        banner.setClickable(true);   // a touch on the banner never reaches the pad under it
+        TextView bannerText = text(c.getString(R.string.TE_BANNER), Theme.T_BODY, Theme.TEXT_BRIGHT);
+        bannerText.setTypeface(Theme.MEDIUM);
+        bannerText.setPadding(0, 0, px(Theme.S2), 0);
+        banner.addView(bannerText);
+        bannerCancel = button(c.getString(R.string.TE_CANCEL), v -> cancel());
+        banner.addView(bannerCancel);
+        bannerSave = button(c.getString(R.string.TE_SAVE), v -> save());
+        banner.addView(bannerSave);
+        LayoutParams blp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT,
+                                            Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        blp.topMargin = px(Theme.S1);
+        addView(banner, blp);
         refresh();
     }
 
@@ -128,8 +159,19 @@ final class TouchEditor extends FrameLayout {
         return gameOnly;
     }
 
-    /** Writes the layout (the console's, or this game's only) and hands it to the listener. */
+    /**
+     * Writes the layout (the console's, or this game's only) and hands it to the listener; a layout with no direction
+     * control or no face button to press (TouchPad.playable) is not saved: the editor says so and stays open.
+     */
     boolean save() {
+        if (closed)
+            return false;
+        if (!edit.pad.playable()) {
+            Log.i(LauncherActivity.TAG, "touch layout: " + layout + " NOT saved: nothing left to play with");
+            status.setText(getContext().getString(R.string.TE_UNPLAYABLE));
+            return false;
+        }
+        closed = true;
         TouchLayout t = edit.layout();
         boolean ok = TouchLayout.save(filesDir, gameKey, layout, t, gameOnly && gameKey != null);
         Log.i(LauncherActivity.TAG, "touch layout: " + layout + (gameOnly ? " for " + gameKey : "") + " "
@@ -139,8 +181,16 @@ final class TouchEditor extends FrameLayout {
         return ok;
     }
 
+    /** Leaves without saving (the layout before the editor stays). Once: a second call does nothing. */
     void cancel() {
-        Log.i(LauncherActivity.TAG, "touch layout: " + layout + " editor cancelled");
+        cancel("cancelled");
+    }
+
+    void cancel(String why) {
+        if (closed)
+            return;
+        closed = true;
+        Log.i(LauncherActivity.TAG, "touch layout: " + layout + " editor " + why + ", nothing saved");
         if (listener != null)
             listener.closed(null);
     }

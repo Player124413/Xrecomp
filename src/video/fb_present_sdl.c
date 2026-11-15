@@ -1221,6 +1221,23 @@ int xbox_FramebufferWindowShaderActive(void)
     return __atomic_load_n(&s_xshader_active, __ATOMIC_ACQUIRE);
 }
 
+/* A live change (the in-game menu, any thread): the main loop takes it at its next turn (xshader_live_take) and
+ * draws the shown frame again, so it is seen at once, also while the game is held. */
+static pthread_mutex_t s_xlive_mu = PTHREAD_MUTEX_INITIALIZER;
+static int s_xlive_pending;              /* atomic */
+static HostShader s_xlive;               /* under s_xlive_mu */
+
+void xbox_FramebufferWindowSetShader(int preset, int strength, int curvature, int ghosting)
+{
+    pthread_mutex_lock(&s_xlive_mu);
+    s_xlive.preset = preset;
+    s_xlive.strength = strength;
+    s_xlive.curvature = curvature;
+    s_xlive.ghosting = ghosting;
+    pthread_mutex_unlock(&s_xlive_mu);
+    __atomic_store_n(&s_xlive_pending, 1, __ATOMIC_RELEASE);
+}
+
 void xbox_FramebufferWindowCapture(const char *path)
 {
     pthread_mutex_lock(&s_capture_mu);
@@ -1268,6 +1285,29 @@ static void xshader_renderer(SDL_Renderer *ren)
     }
     __atomic_store_n(&s_xshader_active, s_xshader.preset != HOST_SHADER_NONE && !s_xshader_off
                                         ? s_xshader.preset : HOST_SHADER_NONE, __ATOMIC_RELEASE);
+}
+
+/* Takes a live change (xbox_FramebufferWindowSetShader): 1 when one was taken (the frame is to be drawn again). A
+ * preset whose shader failed to build stays off; any other is tried again. */
+static int xshader_live_take(void)
+{
+    HostShader s;
+
+    if (!__atomic_load_n(&s_xlive_pending, __ATOMIC_ACQUIRE))
+        return 0;
+    pthread_mutex_lock(&s_xlive_mu);
+    __atomic_store_n(&s_xlive_pending, 0, __ATOMIC_RELAXED);
+    s = s_xlive;
+    pthread_mutex_unlock(&s_xlive_mu);
+    if (s.preset == HOST_SHADER_LCD)
+        s.preset = HOST_SHADER_NONE;   /* a handheld's pixel grid: an Xbox frame is drawn without one */
+    s_xshader = present_shader_clamp(&s);
+    s_xshader_off = s_xshader.preset != HOST_SHADER_NONE && s_xshader_glsl < 0;
+    fprintf(stderr, "  [FBWIN] picture shader changed live: %s%s\n", present_shader_name(s_xshader.preset),
+            s_xshader_off ? " (needs SDL's OpenGL renderer: drawing without one)" : "");
+    __atomic_store_n(&s_xshader_active, s_xshader.preset != HOST_SHADER_NONE && !s_xshader_off
+                                        ? s_xshader.preset : HOST_SHADER_NONE, __ATOMIC_RELEASE);
+    return 1;
 }
 
 /* The preset to draw with, or none (unset, no GL renderer, or its shader failed). */
@@ -1732,6 +1772,10 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             tex_aspect = aspect;
             dirty = 1;
             reupload = 0;
+        }
+        if (xshader_live_take()) {
+            dirty = 1;
+            tex_linear = -1;   /* sharp bilinear samples linearly: the filter is chosen again */
         }
         if (aspect_cls(tex_aspect) != log_cls
                 && (aspect_cls(tex_aspect) == ASPECT_NORMAL || log_cls == ASPECT_NORMAL)) {

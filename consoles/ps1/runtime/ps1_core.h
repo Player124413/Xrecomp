@@ -120,6 +120,7 @@ void ps1_poke32(ps1_machine *m, uint32_t addr, uint32_t v); /* RAM / scratchpad 
 uint32_t ps1_reg(ps1_machine *m, int r);
 uint32_t ps1_pc(ps1_machine *m);
 uint32_t ps1_cop0(ps1_machine *m, int r);
+void ps1_irq_regs(ps1_machine *m, uint32_t *i_stat, uint32_t *i_mask); /* the interrupt controller, no side effect */
 uint64_t ps1_cycles(ps1_machine *m);
 uint64_t ps1_frames(ps1_machine *m);
 uint8_t *ps1_ram(ps1_machine *m); /* the 2 MB of main RAM, writable */

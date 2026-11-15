@@ -72,8 +72,19 @@ final class TouchPadView extends View {
         grid.setStrokeWidth(1f);
     }
 
+    /**
+     * Whether an unplayable saved layout falls back to the defaults (TouchPad.fallBackWhenUnplayable): the live pad
+     * yes, the editor no (it shows what the player made).
+     */
+    private boolean fallBack = true;
+    /** Told once per layout when the player's layout was set aside for the defaults (the reason). */
+    java.util.function.Consumer<String> fallBackListener;
+    private String reported;
+
     /** Edit mode (the touch layout editor): touches move and resize controls, the game gets nothing. */
     TouchEdit startEditing() {
+        fallBack = false;
+        pad.fallBackWhenUnplayable = false;
         pad.cancel();
         send();
         edit = new TouchEdit(pad);
@@ -83,7 +94,9 @@ final class TouchPadView extends View {
 
     /** The player's layout (TouchLayout, XBA-207) on this pad: nothing held. */
     void setCustom(TouchLayout t) {
+        reported = null;
         pad.setCustom(t);
+        reportFallBack();
         send();
         invalidate();
     }
@@ -93,8 +106,10 @@ final class TouchPadView extends View {
         if (pad.layout == l)
             return;
         pad = new TouchPad(l);
+        pad.fallBackWhenUnplayable = fallBack;
         if (getWidth() > 0)
             pad.layout(getWidth(), getHeight(), scale);
+        reportFallBack();
         send();
         invalidate();
     }
@@ -104,8 +119,18 @@ final class TouchPadView extends View {
         opacity = s.opacity;
         if (getWidth() > 0)
             pad.layout(getWidth(), getHeight(), scale);
+        reportFallBack();
         send();
         invalidate();
+    }
+
+    private void reportFallBack() {
+        String why = pad.fellBack;
+        if (why == null || why.equals(reported))
+            return;
+        reported = why;
+        if (fallBackListener != null)
+            fallBackListener.accept(why);
     }
 
     @Override
@@ -116,6 +141,7 @@ final class TouchPadView extends View {
             pad.setCustom(TouchLayout.capture(pad));   // the edits so far, normalised, on the new size
         }
         pad.layout(w, h, scale);
+        reportFallBack();
         send();
     }
 

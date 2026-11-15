@@ -1,7 +1,8 @@
 /* The in-game menu's JNI (fr.adserver.xrecomp.MenuNative, docs/android/app-shell.md « In-game menu »): hold the
  * game while the drawer is open (the lifecycle's MENU reason: the flip parks and the audio device pauses, as in the
  * background), the output volume, quit, a PlayStation game's disc change (XBA-166), and a GBA / PS1 / N64 game's
- * save states and fast-forward (XBA-182, XBA-183, recomp_states.h). Called on the UI thread. */
+ * save states and fast-forward (XBA-182, XBA-183, recomp_states.h), and the picture changed live (scale, filter,
+ * shader). Called on the UI thread. */
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,10 +11,12 @@
 
 #include "apu_volume.h"
 #include "host_audio.h"
+#include "host_window.h"
 #include "ps1_runtime.h"
 #include "platform/recomp_lifecycle.h"
 #include "platform/recomp_quit.h"
 #include "platform/recomp_states.h"
+#include "video/video_player.h"
 
 #define JNI_FN(name) Java_fr_adserver_xrecomp_MenuNative_##name
 
@@ -167,4 +170,37 @@ JNIEXPORT jboolean JNICALL JNI_FN(nativeFastForwardOn)(JNIEnv *env, jclass cls)
     (void)env;
     (void)cls;
     return recomp_ff_toggled() ? JNI_TRUE : JNI_FALSE;
+}
+
+/* The picture changed in the menu, applied at once: a GBA / PS1 / N64 game's scale, filter and shader
+ * (host_window_request_picture: the next present takes them), an Xbox title's shader (the framebuffer window draws
+ * the shown frame again). scale / filter: "aspect" / "integer" / "stretch", "linear" / "nearest" (null or unknown
+ * keeps the current one); shader: a preset name (null or unknown: none); strength -1..100, curvature and ghosting
+ * 0..100. */
+JNIEXPORT void JNICALL JNI_FN(nativeSetPicture)(JNIEnv *env, jclass cls, jboolean xbox, jstring jscale,
+                                                jstring jfilter, jstring jshader, jint strength, jint curvature,
+                                                jint ghosting)
+{
+    (void)cls;
+    char scale[32] = "", filter[32] = "", shader[32] = "";
+    jstring js[3] = {jscale, jfilter, jshader};
+    char *out[3] = {scale, filter, shader};
+    for (int i = 0; i < 3; i++) {
+        const char *c = js[i] ? (*env)->GetStringUTFChars(env, js[i], NULL) : NULL;
+        if (c) {
+            snprintf(out[i], 32, "%s", c);
+            (*env)->ReleaseStringUTFChars(env, js[i], c);
+        }
+    }
+    int preset = host_window_shader_parse(shader);
+    if (preset < 0)
+        preset = HOST_SHADER_NONE;
+    if (xbox) {
+        xbox_FramebufferWindowSetShader(preset, (int)strength, (int)curvature, (int)ghosting);
+    } else {
+        HostShader s = {preset, (int)strength, (int)curvature, (int)ghosting};
+        host_window_request_picture(host_window_scale_parse(scale), host_window_filter_parse(filter), &s);
+    }
+    printf("xboxrecomp: picture from the in-game menu: %s%s%s%s shader %s\n", xbox ? "(xbox)" : "scale ",
+           xbox ? "" : scale, xbox ? "" : ", filter ", xbox ? "" : filter, host_window_shader_name(preset));
 }

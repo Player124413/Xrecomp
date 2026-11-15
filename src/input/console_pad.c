@@ -431,6 +431,13 @@ void console_pad_apply(const ConsolePadMap *m, const HostPadState *st, ConsolePa
     out->host_buttons = st->buttons;
 }
 
+void console_pad_swallow(const ConsolePadMap *m, ConsolePadOut *out, uint32_t swallow)
+{
+    if (!m || !out || !swallow)
+        return;
+    out->buttons = (out->buttons & ~console_pad_targets_using(m, swallow)) | out->overlay_buttons;
+}
+
 static int deflection(int x, int y)
 {
     return abs(x) + abs(y);
@@ -451,6 +458,7 @@ int console_pad_merge(const ConsolePadMap *m, const HostPadState *pad, const Hos
     if (overlay && console_pad_defaults(&d, m->console) == 0) {
         console_pad_apply(&d, overlay, &o);
         out->buttons |= o.buttons;
+        out->overlay_buttons = o.buttons;
         for (int i = 0; i < CONSOLE_PAD_MAX_STICKS; i++)
             if (deflection(o.stick_x[i], o.stick_y[i]) > deflection(out->stick_x[i], out->stick_y[i])) {
                 out->stick_x[i] = o.stick_x[i];

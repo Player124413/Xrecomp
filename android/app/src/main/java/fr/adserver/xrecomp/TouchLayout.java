@@ -224,24 +224,96 @@ final class TouchLayout {
         return new File(new File(dir(filesDir), GAME_DIR), k.replaceAll("[^A-Z0-9_.-]", "_") + "." + l.name() + SUFFIX);
     }
 
-    /** The layout a game gets, and where from. */
+    /** The layout a game gets, and where from; repaired: the entries {@link #repair} dropped or fixed. */
     static final class Resolved {
         final TouchLayout layout;
         final boolean perGame;
+        final int repaired;
 
         Resolved(TouchLayout layout, boolean perGame) {
+            this(layout, perGame, 0);
+        }
+
+        Resolved(TouchLayout layout, boolean perGame, int repaired) {
             this.layout = layout;
             this.perGame = perGame;
+            this.repaired = repaired;
         }
     }
 
-    /** The game's file if it has one, else its console's, else the defaults (an empty layout). */
+    /**
+     * The game's file if it has one, else its console's, else the defaults (an empty layout); what it holds repaired
+     * ({@link #repair}) for the console's layout l.
+     */
     static Resolved resolve(File filesDir, String key, TouchPad.Layout l) {
         File g = gameFile(filesDir, key, l);
-        if (g != null && g.isFile())
-            return new Resolved(parse(read(g)), true);
+        boolean perGame = g != null && g.isFile();
         File c = consoleFile(filesDir, l);
-        return new Resolved(c.isFile() ? parse(read(c)) : new TouchLayout(), false);
+        TouchLayout t = perGame ? parse(read(g)) : c.isFile() ? parse(read(c)) : new TouchLayout();
+        int fixed = t.repair(l);
+        return new Resolved(t, perGame, fixed);
+    }
+
+    /**
+     * Repairs a loaded layout in place for the console's layout l (XBA-212): drops the entries of controls l has not;
+     * a size that is not a number, zero or negative goes back to the default (1), any other is kept in range; a place
+     * that is not a number, off the screen or with its centre on an edge or in the in-game menu's swipe strip
+     * (TouchPad.EDGE_FRAC from the left) goes back to the control's default place. Returns how many entries changed.
+     */
+    int repair(TouchPad.Layout l) {
+        TouchPad pad = new TouchPad(l);
+        int fixed = 0;
+        java.util.Iterator<Map.Entry<Integer, Entry>> it = entries.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, Entry> me = it.next();
+            if (!pad.has(me.getKey())) {
+                it.remove();
+                fixed++;
+                continue;
+            }
+            Entry e = me.getValue();
+            boolean bad = false;
+            if (Float.isNaN(e.size) || Float.isInfinite(e.size) || e.size <= 0f) {
+                e.size = 1f;
+                bad = true;
+            } else if (e.size < MIN_SIZE || e.size > MAX_SIZE) {
+                e.size = Math.max(MIN_SIZE, Math.min(MAX_SIZE, e.size));
+                bad = true;
+            }
+            boolean placed = !Float.isNaN(e.x) || !Float.isNaN(e.y);
+            if (placed && (!inside(e.x, TouchPad.EDGE_FRAC) || !inside(e.y, 0f))) {
+                e.x = e.y = Float.NaN;
+                bad = true;
+            }
+            if (bad)
+                fixed++;
+        }
+        return fixed;
+    }
+
+    /** A normalised coordinate strictly inside (min, 1): NaN (the default) counts as inside. */
+    private static boolean inside(float v, float min) {
+        return Float.isNaN(v) || (!Float.isInfinite(v) && v > min && v < 1f);
+    }
+
+    /**
+     * Settings › Controls › « Reset touch layouts » (XBA-212): every saved layout removed, the consoles' and the
+     * games' own. Returns how many files went.
+     */
+    static int resetAll(File filesDir) {
+        return deleteTree(dir(filesDir));
+    }
+
+    private static int deleteTree(File f) {
+        int n = 0;
+        File[] kids = f.listFiles();
+        if (kids != null)
+            for (File k : kids)
+                n += deleteTree(k);
+        if (f.isFile() && f.delete())
+            return n + 1;
+        f.delete();
+        return n;
     }
 
     /**

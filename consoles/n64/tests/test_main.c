@@ -265,6 +265,21 @@ static void test_helpers(void)
         CHECK(n == 6); /* fixed 2: two of every three */
         run = 0;
         CHECK(n64_runtime_frameskip(0, (int64_t)f * 10, f, 1, &run) == 0);
+        /* Over new pictures only: auto never skips two in a row; fixed N and 0 as above. */
+        run = 0;
+        n = 0;
+        for (int i = 0; i < 8; i++)
+            n += n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, (int64_t)f, f, 0, &run);
+        CHECK(n == 4); /* skip 1, show 1 */
+        run = 0;
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, 0, f, 0, &run) == 0 && run == 0);
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, 0, f, 1, &run) == 1 && run == 1);
+        CHECK(n64_runtime_frameskip_picture(N64_RT_FRAMESKIP_AUTO, (int64_t)f, f, 1, &run) == 0 && run == 0);
+        n = 0;
+        for (int i = 0; i < 9; i++)
+            n += n64_runtime_frameskip_picture(2, 0, f, 0, &run);
+        CHECK(n == 6);
+        CHECK(n64_runtime_frameskip_picture(0, (int64_t)f * 10, f, 1, &run) == 0);
     }
 }
 
@@ -359,7 +374,12 @@ static void test_perf_format(void)
     p.cpu = 6;
     p.cpu_khz = 1900800;
     n64_runtime_perf_format(&p, line, sizeof line);
-    CHECK(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (wait 3.0) sched 0.3 vi 1.8 present "
+    p.rdp_queue_ms = 1.0;
+    p.rdp_sync_ms = 2.5;
+    p.rdp_scanout_ms = 0.5;
+    n64_runtime_perf_format(&p, line, sizeof line);
+    CHECK(strcmp(line, "speed 25 % (15.0 of 60.0 VI/s); cpu 7.9 rsp 4.1 rdp 5.2 (queue 1.0, sync 2.5, scanout 0.5) "
+                       "sched 0.3 vi 1.8 present "
                        "0.9 audio 0.0 idle 0.0 other 0.0 ms/frame; worst 41 ms, 120 > 16.7 ms, 30 > 33.4 ms of 150 "
                        "frames; rsp 1.20 M instr, rdp 3400 cmds, 2.0 full syncs /frame; pack 83 % native, 3.1 k "
                        "interp instr/frame, 12 rehashes, 40 slow lookups; rdp vulkan, upscale 2x, rewind off; core 6 @ "
@@ -378,6 +398,41 @@ static void test_perf_format(void)
     p.cpu = -1;
     n64_runtime_perf_format(&p, line, sizeof line);
     CHECK(strstr(line, "; core ?") != NULL);
+
+    /* The detail line: the pictures against the VIs, the worst frame's own breakdown. */
+    memset(&p, 0, sizeof p);
+    p.seconds = 10.0;
+    p.frames = 500;
+    p.pictures = 167;
+    p.unchanged = 333;
+    p.vi_origin_changes = 167;
+    p.scanouts = 167;
+    p.queue_waits = 40;
+    p.stalled_compiles = 2;
+    p.stalled_compile_ms = 70.4;
+    p.worst_ms = 40.2;
+    p.worst_core_ms = 30.1;
+    p.worst_vi_ms = 7.2;
+    p.worst_present_ms = 1.8;
+    p.worst_audio_ms = 0.1;
+    p.worst_other_ms = 1.0;
+    p.worst_queue_ms = 9.0;
+    p.worst_sync_ms = 8.0;
+    p.worst_scanout_ms = 3.0;
+    p.worst_deadline_ms = 0.2;
+    p.scanouts_early = 160;
+    p.dp_deferred = 160;
+    p.dp_now = 7;
+    p.dp_early = 1;
+    p.dp_waits = 12;
+    p.dp_wait_ms = 3.5;
+    n64_runtime_perf_detail_format(&p, line, sizeof line);
+    CHECK(strcmp(line, "500 VIs, 167 pictures (16.7/s), 333 unchanged, 0 skipped; 167 VI_ORIGIN changes, 167 scanouts "
+                       "(160 early), 40 full rings; DP 160 deferred (1 early, 0 backoffs), 7 at once, 12 waited 3.5 "
+                       "ms (0.02 ms each); 2 stalled compiles (70 ms); worst 40 ms: core 30.1 vi 7.2 present 1.8 "
+                       "audio 0.1 other 1.0 (rdp queue 9.0, sync 8.0, deadline 0.2, scanout 3.0)") == 0);
+    if (failures)
+        printf("detail line: %s\n", line);
 }
 
 static void test_states(const char *dir, const char *hb)

@@ -53,6 +53,8 @@
     <string name="OPT_RUMBLE">Vibration de la manette</string>
     <string name="OPT_RUMBLE_DETAIL">Activée : la manette vibre quand le jeu le demande (la DualShock de la PlayStation, le Rumble Pak de la Nintendo 64, la manette Xbox). Désactivée : jamais. Pour toutes les consoles. S\'applique au prochain lancement d\'un jeu. (RECOMP_RUMBLE)</string>
 
+    <string name="ROM_RESUME">Reprendre</string>
+    <string name="ROM_START">Démarrer</string>
     <string name="ROM_OPTIONS">Réglages du jeu</string>
     <string name="ROM_OPT_PICTURE">L\'image de ce jeu</string>
     <string name="ROM_OPT_DATA">Données du jeu</string>
@@ -78,5 +80,5 @@
     <string name="GS_OWN_COUNT">%1$d à lui</string>
     <string name="GS_HINT_RESET">Remettre</string>
     <string name="MENU_GAME_SETTINGS">Réglages du jeu</string>
-    <string name="MENU_GS_NEXT_START">Les valeurs de ce jeu : elles s\'appliquent à son prochain lancement</string>
+    <string name="MENU_GS_NEXT_START">Les valeurs de ce jeu : l\'image change tout de suite, le reste au redémarrage du jeu</string>
 </resources>

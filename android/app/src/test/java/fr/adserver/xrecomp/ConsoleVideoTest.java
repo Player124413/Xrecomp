@@ -298,4 +298,46 @@ public class ConsoleVideoTest {
         GameStore.rememberLaunch(c, dir.getPath(), "Game", "4D5300D1");   // an Xbox launch clears the ROM
         assertEquals("4D5300D1", GameLanguage.runningTitleId(c));
     }
+
+    /**
+     * The picture the in-game menu sends live: the game's value, else recomp.cfg's, else the runtime's default (scale
+     * aspect, the GBA's filter nearest and the others linear, no shader, the preset's own strength); a game's « »
+     * is the default even over recomp.cfg; an Xbox title has no scale, filter or ghosting.
+     */
+    @Test
+    public void livePicture() throws Exception {
+        RecompConfig cfg = RecompConfig.load(tmp.newFolder("live"));
+        ConsoleVideo.Picture p = ConsoleVideo.livePicture(Console.GBA, cfg, null);
+        assertEquals("aspect", p.scale);
+        assertEquals("nearest", p.filter);
+        assertEquals("none", p.shader);
+        assertEquals(-1, p.strength);
+        assertEquals("linear", ConsoleVideo.livePicture(Console.PS1, cfg, null).filter);
+        cfg.set("RECOMP_SCALE", "integer");
+        cfg.set("RECOMP_SHADER", "crt");
+        cfg.set("RECOMP_SHADER_STRENGTH", "75");
+        cfg.set("RECOMP_SHADER_GHOSTING", "40");
+        RecompConfig game = RecompConfig.loadFile(new File(tmp.newFolder("g"), "g.cfg"), "#");
+        game.set("RECOMP_FILTER", "linear");
+        game.set("RECOMP_SCALE", "");   // the game's « default »: aspect, whatever Settings say
+        p = ConsoleVideo.livePicture(Console.GBA, cfg, game);
+        assertEquals("aspect", p.scale);
+        assertEquals("linear", p.filter);
+        assertEquals("crt", p.shader);
+        assertEquals(75, p.strength);
+        assertEquals(40, p.ghosting);
+        game.set("RECOMP_SHADER", "bogus");
+        assertEquals("none", ConsoleVideo.livePicture(Console.GBA, cfg, game).shader);
+        ConsoleVideo.Picture x = ConsoleVideo.livePicture(Console.XBOX, cfg, null);
+        assertTrue(x.xbox);
+        assertNull(x.scale);
+        assertNull(x.filter);
+        assertEquals(0, x.ghosting);
+        assertEquals("crt", x.shader);
+        assertEquals(x, ConsoleVideo.livePicture(Console.XBOX, cfg, null));
+        assertFalse(x.equals(p));
+        assertTrue(ConsoleVideo.isLive("RECOMP_SHADER"));
+        assertFalse(ConsoleVideo.isLive("RECOMP_UPSCALE"));
+        assertFalse(ConsoleVideo.isLive("RECOMP_LANGUAGE"));
+    }
 }

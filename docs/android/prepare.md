@@ -1006,12 +1006,16 @@ table, its `abi` (`n64_attach_recomp`) and its `source_sha256`. `PACK_LOADED n64
 does the same (a library with no `pack.json` beside it: the table's checks only); `n64_play` exports the core
 (`n64_core_exported`), as `n64_run` does.
 
-**The discovery loop.** At exit (also the in-game menu's Quit, through the exit hook) the runtime appends the code the
-interpreter had to start running while the pack was attached, after the boot PC, that no entry matched
-(`n64_recomp_write_missed`) to `<files>/work/n64-<KEY>/discovered.txt`: `ADDR HASH HEXBYTES` per line (the virtual
-address, the content hash, up to 2 KB of the code as it was in RDRAM, never past a mapped page), a record the file
-already holds never written twice, the folder made first. Log: `n64: code at <N> address(es) the pack did not cover,
-<A> new record(s), in <path>`. The next Prepare finds the file in its work folder and the lift takes it, bytes
+**The discovery loop.** When the app pauses (a session usually ends killed in the background, after the pause), every
+three minutes of play and at exit (also the in-game menu's Quit, through the exit hook) the runtime appends the code
+the interpreter had to start running while the pack was attached, after the boot PC, that no entry matched (a branch
+taken or jump into it, not code that follows in sequence; `n64_recomp_write_missed`) to
+`<files>/work/n64-<KEY>/discovered.txt`: `ADDR HASH HEXBYTES` per line (the virtual address, the content hash, up to
+2 KB of the code as it was in RDRAM, never past a mapped page; a record inside an earlier one with the same bytes holds
+its first 16 words only), one record per code at an address (records that agree over their common length are the
+same code; files written before 2026-11-15 hold the same code several times, the lift merges them), a record the file
+already holds never written twice, the folder made first; 65536 records and 64 MB of code per run at most. Log, when
+something was added: `n64: code at <N> address(es) the pack did not cover, <A> new record(s), in <path>`. The next Prepare finds the file in its work folder and the lift takes it, bytes
 included: code loaded by DMA from computed addresses, decompressed or TLB-mapped code gets lifted. Home compares the
 file's line count with the pack's `discovered` (app-shell.md « Nintendo 64 games »).
 
