@@ -145,6 +145,11 @@ typedef struct n64_cpu {
     /* COUNT runs at half the CPU clock: COUNT = count_base + (now - count_tick) / 4. */
     uint32_t count_base;
     uint64_t count_tick;
+    /* RANDOM (n64_cpu.c random_reg): 31 at instruction random_base, the count of the instruction two after the last
+     * WIRED write; before that instruction it still runs on the previous WIRED (wired_prev, random_base_prev). */
+    uint64_t random_base;
+    uint64_t random_base_prev;
+    uint32_t wired_prev;
 } n64_cpu;
 
 /* ---- Events ---------------------------------------------------------------------------------------------------- */
@@ -328,6 +333,9 @@ void n64_cpu_set_count(n64_machine *m, uint32_t v);
 void n64_cpu_schedule_compare(n64_machine *m);
 /* Raises an exception (EPC from the instruction being run). */
 void n64_cpu_exception(n64_machine *m, int code, int ce);
+/* The coprocessor number (1, 2) of the instruction after the current one when it is a COP1 / COP2 instruction in
+ * cached / uncached RDRAM, else 0: the Cause CE of an FPE raised by CTC1 (n64_fpu_write_fcsr). */
+int n64_cpu_next_cop(n64_machine *m);
 /* Address translation without side effects (debug): 0 and the physical address, or -1. */
 int n64_cpu_probe(n64_machine *m, uint64_t va, uint32_t *pa);
 /* One instruction at pc (the interpreter's loop body without its checks), and taking the pending interrupt: the

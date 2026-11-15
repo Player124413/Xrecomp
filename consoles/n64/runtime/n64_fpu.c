@@ -222,8 +222,10 @@ void n64_fpu_write_fcsr(n64_machine *m, uint32_t v)
     c->fcsr = v & 0x0183FFFFu;
     uint32_t cause = (c->fcsr >> FCSR_CAUSE_SHIFT) & 0x3F;
     uint32_t en = (c->fcsr >> FCSR_ENABLES_SHIFT) & 0x1F;
+    /* The exception is taken while the next instruction is decoded: a COP1 / COP2 one leaves its number in Cause CE
+     * (n64-systemtest "Fire exception through CTC1 (followed by MFC1)", cycle group). */
     if (cause & (en | FPE_E))
-        n64_cpu_exception(m, EXC_FPE, 0);
+        n64_cpu_exception(m, EXC_FPE, n64_cpu_next_cop(m));
 }
 
 /* ---- Operations ------------------------------------------------------------------------------------------------ */
@@ -546,7 +548,7 @@ void n64_fpu_cop1(n64_machine *m, uint32_t ins)
         if (rt & 2) { /* likely */
             if (taken) {
                 c->next_ds = true;
-                c->npc = c->cur + 4 + (uint64_t)(off << 2);
+                c->npc = c->pc + (uint64_t)(off << 2);
             } else {
                 c->pc = c->npc;
                 c->npc += 4;
@@ -554,7 +556,7 @@ void n64_fpu_cop1(n64_machine *m, uint32_t ins)
         } else {
             c->next_ds = true;
             if (taken)
-                c->npc = c->cur + 4 + (uint64_t)(off << 2);
+                c->npc = c->pc + (uint64_t)(off << 2);
         }
         return;
     }

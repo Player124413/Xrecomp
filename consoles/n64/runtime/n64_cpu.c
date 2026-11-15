@@ -87,13 +87,21 @@ void n64_cpu_set_count(n64_machine *m, uint32_t v)
     n64_cpu_schedule_compare(m);
 }
 
-/* RANDOM counts down from 31 and wraps to 31 after reaching WIRED (6-bit counter: with WIRED > 31 it runs through
- * 0 and 63 down to WIRED). Derived from the instruction count rather than kept per instruction. */
+/* RANDOM counts down from 31 by one per instruction and wraps to 31 after reaching WIRED (6-bit counter: with
+ * WIRED > 31 it runs through 0 and 63 down to WIRED). Derived from the instruction count rather than kept per
+ * instruction. A WIRED write sets it to 31 two instructions later; an MFC0 right after the MTC0 still sees the old
+ * sequence (n64-systemtest "Random (decrement)", timing group, and "Random (read early)", cop0hazard group). */
 static uint32_t random_reg(n64_machine *m)
 {
-    uint32_t wired = (uint32_t)m->cpu.cop0[C0_WIRED] & 63;
+    const n64_cpu *c = &m->cpu;
+    uint32_t wired = (uint32_t)c->cop0[C0_WIRED] & 63;
+    uint64_t base = c->random_base;
+    if (m->instructions < base) {
+        wired = c->wired_prev;
+        base = c->random_base_prev;
+    }
     uint32_t span = wired <= 31 ? 32 - wired : 32 + 64 - wired;
-    uint32_t i = (uint32_t)(m->instructions % span);
+    uint32_t i = (uint32_t)((m->instructions - base) % span);
     return i <= 31 ? 31 - i : 63 - (i - 32);
 }
 
@@ -162,6 +170,19 @@ static void exception_vec(n64_machine *m, int code, int ce, uint32_t offset)
 void n64_cpu_exception(n64_machine *m, int code, int ce)
 {
     exception_vec(m, code, ce, 0x180);
+}
+
+int n64_cpu_next_cop(n64_machine *m)
+{
+    const n64_cpu *c = &m->cpu;
+    if (c->ds)
+        return 0;
+    uint64_t pc = c->cur + 4;
+    uint64_t off = (pc - 0xFFFFFFFF80000000ull) & ~0x20000000ull; /* KSEG0 or KSEG1 */
+    if (pc < 0xFFFFFFFF80000000ull || pc >= 0xFFFFFFFFC0000000ull || off >= (uint64_t)m->rdram_size)
+        return 0;
+    uint32_t op = n64_be32(m->rdram + off) >> 26;
+    return op == 0x11 ? 1 : op == 0x12 ? 2 : 0;
 }
 
 /* BadVAddr, Context / XContext BadVPN2 and EntryHi VPN2 / R: set by TLB and address error exceptions alike. */
@@ -574,7 +595,12 @@ static void cop0_write(n64_machine *m, int r, uint64_t v)
         c->cop0[r] = v & 0x01FFE000u;
         break;
     case C0_WIRED:
+        if (m->instructions >= c->random_base) { /* else the previous write has not taken effect yet */
+            c->wired_prev = (uint32_t)c->cop0[r] & 63;
+            c->random_base_prev = c->random_base;
+        }
         c->cop0[r] = v & 0x3F;
+        c->random_base = m->instructions + 2;
         break;
     case C0_COUNT:
         n64_cpu_set_count(m, (uint32_t)v);
@@ -726,18 +752,20 @@ static void cop0_op(n64_machine *m, uint32_t ins)
 #define NEED64() do { if (N64_UNLIKELY(!c->ops64)) RI(); } while (0)
 #define SET(r, v) do { if (r) c->gpr[r] = (v); } while (0)
 
+/* A branch adds its offset to the PC of the instruction after it: cur + 4, but in the delay slot of a jump or another
+ * branch, that one's target (n64-systemtest "BEQ: Within delay slot of J", cycle group). */
 static inline void branch(n64_cpu *c, bool taken, int64_t off)
 {
     c->next_ds = true;
     if (taken)
-        c->npc = c->cur + 4 + (uint64_t)(off << 2);
+        c->npc = c->pc + (uint64_t)(off << 2);
 }
 
 static inline void branch_likely(n64_cpu *c, bool taken, int64_t off)
 {
     if (taken) {
         c->next_ds = true;
-        c->npc = c->cur + 4 + (uint64_t)(off << 2);
+        c->npc = c->pc + (uint64_t)(off << 2);
     } else { /* the delay slot is nullified */
         c->pc = c->npc;
         c->npc += 4;
@@ -1199,7 +1227,21 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
             n64_cpu_exception(m, EXC_CPU, 2);
             return;
         }
-        RI();
+        /* With CU2 set they raise nothing and go through the COP2 latch like the moves (n64-systemtest
+         * "LWC2/LDC2/SWC2/SDC2", a poorly understood quirk): both loads fill the latch with the aligned doubleword,
+         * SDC2 stores the latch, SWC2 its low word. */
+        {
+            uint64_t a = g[rs] + (uint64_t)imm;
+            if ((ins >> 26) == 0x32 || (ins >> 26) == 0x36) {
+                if (rd(m, a & ~(uint64_t)7, 8, &v))
+                    c->cop2_latch = v;
+            } else if ((ins >> 26) == 0x3E) {
+                wr(m, a & ~(uint64_t)7, 8, c->cop2_latch);
+            } else {
+                wr(m, a & ~(uint64_t)3, 4, (uint32_t)c->cop2_latch);
+            }
+        }
+        break;
     default: /* 0x1C-0x1E, 0x33, 0x3B: reserved (COP3 loads / stores) */
         RI();
     }
