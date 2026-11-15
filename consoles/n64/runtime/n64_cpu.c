@@ -49,6 +49,10 @@ void n64_cpu_status_changed(n64_machine *m)
         c->ops64 = c->addr64;
         break;
     }
+    /* Status.RE (reverse endian) in user mode: the aligned accesses reach their address XOR 8 - size (bytes 7,
+     * halfwords 6, words and instructions 4), the partial ones (LWL ... SDR) theirs XOR 7; BadVAddr keeps the
+     * address as given (n64-systemtest "RE user mode ..."). */
+    c->re = c->ksu == 2 && (sr & SR_RE);
     n64_cpu_update_irq(m);
 }
 
@@ -369,6 +373,8 @@ static N64_HOT_INLINE bool rd_x(n64_machine *m, uint64_t va, int size, uint64_t 
     uint32_t pa;
     if (!vtop(m, va, ACC_LOAD, &pa, raise))
         return false;
+    if (N64_UNLIKELY(m->cpu.re))
+        pa ^= (uint32_t)(8 - size) & 7;
     if (N64_LIKELY(pa < m->rdram_size)) {
         const uint8_t *p = m->rdram + pa;
         switch (size) {
@@ -433,6 +439,8 @@ static N64_HOT_INLINE bool wr_x(n64_machine *m, uint64_t va, int size, uint64_t 
     uint32_t pa;
     if (!vtop(m, va, ACC_STORE, &pa, raise))
         return false;
+    if (N64_UNLIKELY(m->cpu.re))
+        pa ^= (uint32_t)(8 - size) & 7;
     if (N64_LIKELY(pa < m->rdram_size)) {
         if (N64_UNLIKELY(m->mi_mode & 0x80)) {
             mi_repeat_write(m, pa, size, v);
@@ -522,6 +530,8 @@ static bool fetch_slow(n64_machine *m, uint64_t pc, uint32_t *ins)
     uint32_t pa;
     if (!vtop_slow(m, pc, ACC_FETCH, &pa, true))
         return false;
+    if (m->cpu.re)
+        pa ^= 4;
     if (pa < m->rdram_size) {
         *ins = n64_be32(m->rdram + pa);
         m->now += kseg1(pc) ? COST_UNCACHED_RAM : COST_CACHED;
@@ -1073,6 +1083,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x1A: case 0x1B: { /* LDL LDR */
         NEED64();
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         if (!rd_partial(m, a, 8, &v))
             return;
         uint64_t r = g[rt];
@@ -1094,6 +1106,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x21: if (rd(m, g[rs] + (uint64_t)imm, 2, &v)) SET(rt, (uint64_t)(int64_t)(int16_t)v); break;  /* LH */
     case 0x22: case 0x26: { /* LWL LWR */
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         if (!rd_partial(m, a, 4, &v))
             return;
         uint32_t r = (uint32_t)g[rt], w = (uint32_t)v;
@@ -1118,6 +1132,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x29: wr(m, g[rs] + (uint64_t)imm, 2, g[rt]); break;
     case 0x2A: case 0x2E: { /* SWL SWR: the bytes of the aligned word they cover */
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         uint32_t r = (uint32_t)g[rt], mask, data;
         if ((ins >> 26) == 0x2A) {
             unsigned sh = 8 * (unsigned)(a & 3);
@@ -1135,6 +1151,8 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
     case 0x2C: case 0x2D: { /* SDL SDR */
         NEED64();
         uint64_t a = g[rs] + (uint64_t)imm;
+        if (N64_UNLIKELY(c->re))
+            a ^= 7;
         uint64_t r = g[rt], mask, data;
         if ((ins >> 26) == 0x2C) {
             unsigned sh = 8 * (unsigned)(a & 7);

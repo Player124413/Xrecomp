@@ -150,6 +150,7 @@ typedef struct n64_cpu {
     uint64_t random_base;
     uint64_t random_base_prev;
     uint32_t wired_prev;
+    bool re;              /* derived from STATUS: user mode with RE, reverse-endian accesses (n64_cpu.c) */
 } n64_cpu;
 
 /* ---- Events ---------------------------------------------------------------------------------------------------- */

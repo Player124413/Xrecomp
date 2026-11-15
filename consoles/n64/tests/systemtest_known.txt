@@ -3,6 +3,3 @@
 CACHE
 ICACHE:
 DCACHE:
-# Status.RE (reverse-endian user mode) is not implemented.
-RE user mode
-RE unmapped access
