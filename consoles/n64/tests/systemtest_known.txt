@@ -1,5 +1,8 @@
-# n64-systemtest failures the core accepts for now (run_systemtest.sh): test name prefixes, one per line.
-# The VR4300 caches are not modelled (every access sees memory; CACHE does nothing).
-CACHE
-ICACHE:
-DCACHE:
+# n64-systemtest failures the core accepts (run_systemtest.sh): test name prefixes, one per line.
+# The VR4300 caches hold no data here (only their tags, for CACHE): every access sees memory, as the recompiled code,
+# which reads and writes RDRAM directly, must. So stale lines and write backs of dirty ones cannot be observed.
+ICACHE: uncached patch does not affect fetched line until invalidate
+CACHE icache hit writeback (0x18) pushes line to RAM
+DCACHE: cached LW stale after uncached SW until invalidate
+DCACHE: hit writeback pushes dirty line to RAM
+CACHE dcache hit writeback invalidate (0x15)

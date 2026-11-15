@@ -151,6 +151,9 @@ typedef struct n64_cpu {
     uint64_t random_base_prev;
     uint32_t wired_prev;
     bool re;              /* derived from STATUS: user mode with RE, reverse-endian accesses (n64_cpu.c) */
+    /* The caches' tags as the CACHE instruction sees them (TagLo layout: PFN 27:8, state 7:6); no data is cached. */
+    uint32_t itag[512];
+    uint32_t dtag[512];
 } n64_cpu;
 
 /* ---- Events ---------------------------------------------------------------------------------------------------- */

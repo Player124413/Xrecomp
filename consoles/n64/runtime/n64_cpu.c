@@ -547,6 +547,59 @@ static bool fetch_slow(n64_machine *m, uint64_t pc, uint32_t *ins)
     return true;
 }
 
+/* CACHE (op: the rt field, cache in bits 1:0, operation in 4:2). Only the tags are modelled (n64_cpu itag / dtag):
+ * every access still reads and writes memory, so the operations on data (fills, write backs) leave memory as it is,
+ * while index / hit invalidates, store / load tag, fill and create dirty exclusive keep the tags the way the hardware
+ * does (n64-systemtest "CACHE icache index invalidate ...", "CACHE dcache create dirty exclusive ..."). The hit
+ * operations translate the address and can raise TLB exceptions; the index ones use its low bits only. */
+static void cache_op(n64_machine *m, int op, uint64_t va)
+{
+    n64_cpu *c = &m->cpu;
+    bool dcache = (op & 3) == 1;
+    if ((op & 3) > 1)
+        return; /* no secondary cache */
+    uint32_t *tag = dcache ? &c->dtag[(va >> 4) & 511] : &c->itag[(va >> 5) & 511];
+    uint32_t valid = dcache ? 3u << 6 : 2u << 6; /* D: valid dirty (PState 3), I: valid (2) */
+    int kind = op >> 2;
+    uint32_t pa = 0;
+    if (kind >= 3) { /* create dirty exclusive, the hit operations, fill */
+        if (!vtop(m, va, ACC_LOAD, &pa, true))
+            return;
+    }
+    uint32_t pfn = (pa >> 12) << 8;
+    bool hit = (*tag & 0xC0u) && (*tag & 0x0FFFFF00u) == pfn;
+    switch (kind) {
+    case 0: /* index invalidate (I) / index write back invalidate (D) */
+        *tag &= ~0xC0u;
+        break;
+    case 1: /* index load tag */
+        c->cop0[C0_TAGLO] = *tag;
+        c->cop0[C0_TAGHI] = 0;
+        break;
+    case 2: /* index store tag */
+        *tag = (uint32_t)c->cop0[C0_TAGLO] & 0x0FFFFFC0u;
+        break;
+    case 3: /* create dirty exclusive (D) */
+        if (dcache)
+            *tag = pfn | valid;
+        break;
+    case 4: /* hit invalidate */
+        if (hit)
+            *tag &= ~0xC0u;
+        break;
+    case 5: /* hit write back invalidate (D) / fill (I) */
+        if (dcache) {
+            if (hit)
+                *tag &= ~0xC0u;
+        } else {
+            *tag = pfn | valid;
+        }
+        break;
+    default: /* hit write back: memory is always current */
+        break;
+    }
+}
+
 /* ---- Arithmetic helpers ---------------------------------------------------------------------------------------- */
 
 static void mulu64(uint64_t a, uint64_t b, uint64_t *hi, uint64_t *lo)
@@ -1166,11 +1219,12 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
         store_masked(m, a, data, mask, 8);
         break;
     }
-    case 0x2F: /* CACHE: no cache model */
+    case 0x2F: /* CACHE */
         if (c->ksu != 0 && !(c->cop0[C0_STATUS] & SR_CU0)) {
             n64_cpu_exception(m, EXC_CPU, 0);
             return;
         }
+        cache_op(m, rt, g[rs] + (uint64_t)imm);
         break;
     case 0x30: { /* LL */
         uint64_t a = g[rs] + (uint64_t)imm;
