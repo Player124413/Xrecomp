@@ -195,7 +195,7 @@ jobs:
           base=${MERGE_BASE:-$BASE_SHA}
           if [ -n "$base" ] && git fetch -q --depth 1 "$url" "$base" 2>/dev/null \
              && files=$(git diff --name-only "$base" HEAD); then
-            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh)$|\.gitea/workflows/ci\.yml$)'; then
+            if printf '%s\n' "$files" | grep -qE '^(consoles/[^/]+/tests/homebrew/|consoles/gba/|consoles/n64/|tools/prepare/|tools/docker/((gba|ps1|n64)-homebrew|linux)\.Dockerfile$|tools/consoles/(build_homebrew\.sh|run_gba_packs\.sh|gba_corpus_packs\.py|gba_recomp_build\.py|gba_test_inputs\.sh|build_gba_bios\.sh|fetch_gba_tests\.sh|build_gba_suite\.sh|run_n64_homebrew\.sh|build_n64_libdragon_tests\.sh)$|\.gitea/workflows/ci\.yml$)'; then
               echo "build=true" >> "$GITHUB_OUTPUT"
             else
               echo "Nothing the homebrew corpus is built from: skipped."
@@ -229,9 +229,17 @@ jobs:
         if: steps.paths.outputs.build == 'true'
         run: JOBS=4 bash tools/consoles/run_gba_packs.sh out/homebrew out/gba-packs out/gba-inputs
 
+      # XBA-202: libdragon's test ROM and rsp_inval_instrs (Unlicense), built from source in the N64 toolchain image
+      # (a few seconds), run as n64_libdragon_tests / n64_rsp_inval_instrs (about 35 s) in the step below.
+      - name: N64 open test ROMs (libdragon testrom, rsp_inval_instrs)
+        if: steps.paths.outputs.build == 'true'
+        run: |
+          apk add --no-cache git >/dev/null
+          JOBS=4 bash tools/consoles/build_n64_libdragon_tests.sh out/n64-open
+
       - name: N64 corpus through the runtime's ctest (interpreter, recompiled in lockstep, states, rewind)
         if: steps.paths.outputs.build == 'true'
-        run: JOBS=4 bash tools/consoles/run_n64_homebrew.sh out/homebrew out/n64-homebrew
+        run: JOBS=4 bash tools/consoles/run_n64_homebrew.sh out/homebrew out/n64-homebrew out/n64-open
 
       # actions/upload-artifact runs on Node, which the docker CLI image does not have.
       - name: Node for the artefact upload
