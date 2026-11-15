@@ -40,4 +40,13 @@ RUN cd /src \
     && cp LICENSE /out/LICENSE \
     && echo "lemmy-64/n64-systemtest ${SYSTEMTEST_COMMIT}, nust64 ${NUST64_VERSION} (libdragon release IPL3)" >/out/VERSION
 
+# The same ROM with every test group n64-systemtest has (its default build is "base" only): timing (a NOP is half a
+# cycle, Random counts instructions), cycle, cop0hazard and poorly_understood_quirk. Groups the core does not aim at:
+# measured, not gated (run_systemtest.sh full).
+RUN cd /src \
+    && cargo -Z sparse-registry build --release -j "${JOBS}" --target-dir target-full \
+        --features base,timing,cycle,cop0hazard,poorly_understood_quirk \
+    && nust64 --libdragon release --elf target-full/mips-nintendo64-none/release/n64-systemtest \
+    && cp "$(find target-full -name '*.z64' | head -n 1)" /out/n64-systemtest-full.z64
+
 WORKDIR /out
