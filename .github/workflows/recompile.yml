@@ -1,0 +1,85 @@
+# Recompile a game on GitHub: a link to your own dump in, its recompiled C sources out, as an artifact of the run.
+# Nothing else: no build, no release, nothing committed. Started by hand (Actions › Recompile a game › Run workflow).
+#
+#   url        a direct link to the dump: an Xbox disc image (.iso / .xiso / .cso / .zso / .cci), a GBA ROM, a PS1
+#              disc (.iso / .chd, or a .cue with its .bin) or an N64 ROM; or to a zip / 7z / rar that holds it.
+#              Hugging Face « blob » links work as they are, Dropbox and Google Drive share links too. Several links
+#              (split parts, a .cue and its .bin) go in the same field, separated by spaces.
+#   filename   only for a link that does not end with the file's name: the name to save it under, extension included.
+#   keep_days  how long GitHub keeps the artifact.
+#
+# The console is read from the file (tools/ci/recomp_source.py, as tools.prepare does), then only the lift runs:
+# `tools.prepare --no-build` for an Xbox title (the CMake title project), `<console>_tools.recomp` for the others.
+# The artifact holds those sources, a README.md with the commands that build them and recomp_info.json. The dump and
+# its data are deleted with the runner and never uploaded.
+#
+# A private Hugging Face repository: add its access token as the repository secret HF_TOKEN.
+#
+# Bring your own games (README « Try it »): the sources are lifted from the game's code, and the artifacts of a
+# public repository can be downloaded by anyone signed in to GitHub. Run this from a private copy of the repository
+# when they must stay yours, or delete the artifact once you have it. The links are read from the event file and
+# masked, so the log does not show them.
+name: Recompile a game
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Link to your game dump: an ISO / ROM, or a zip / 7z / rar with it (several links: spaces between)"
+        required: true
+        type: string
+      filename:
+        description: "File name with its extension, only when the link does not end with one (e.g. game.iso)"
+        required: false
+        type: string
+      keep_days:
+        description: "Days to keep the artifact"
+        required: false
+        type: number
+        default: 7
+
+permissions:
+  contents: read
+
+jobs:
+  recompile:
+    name: Recompile to C sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Recompiler dependencies
+        run: python -m pip install --quiet capstone
+      # A full Xbox disc is close to 8 GB, twice that while an archive of it unpacks: the SDKs this job never uses
+      # make room for it.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h "$RUNNER_TEMP" | tail -n 1
+      - name: Download the game
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          mapfile -t urls < <(jq -r '.inputs.url // ""' "$GITHUB_EVENT_PATH" | tr -s '[:space:]' '\n' | sed '/^$/d')
+          name=$(jq -r '.inputs.filename // ""' "$GITHUB_EVENT_PATH")
+          if [ "${#urls[@]}" -eq 0 ]; then echo "::error::no link given"; exit 1; fi
+          for u in "${urls[@]}"; do echo "::add-mask::${u//%/%25}"; done
+          args=()
+          if [ -n "$name" ]; then args+=(--name "$name"); fi
+          python tools/ci/recomp_source.py fetch --dest "$RUNNER_TEMP/game" "${args[@]}" "${urls[@]}"
+      - name: Recompile to C
+        id: lift
+        run: |
+          python tools/ci/recomp_source.py lift "$RUNNER_TEMP/game" \
+            --out "$RUNNER_TEMP/recomp-src" --work "$RUNNER_TEMP/recomp-work"
+      - name: Upload the sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.lift.outputs.name }}
+          path: ${{ steps.lift.outputs.path }}
+          retention-days: ${{ inputs.keep_days }}
+          compression-level: 9
+          if-no-files-found: error
