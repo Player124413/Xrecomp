@@ -6,5 +6,3 @@ DCACHE:
 # Status.RE (reverse-endian user mode) is not implemented.
 RE user mode
 RE unmapped access
-# The PI DMA's repeated bytes at the very end of an RDRAM page.
-cart_memory: DMA CART -> RDRAM (misaligned, end of page)

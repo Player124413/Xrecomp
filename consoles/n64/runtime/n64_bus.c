@@ -155,18 +155,26 @@ static uint64_t pi_dma_ticks(n64_machine *m, uint32_t cart, uint32_t len)
  * through its buffer, each ending at the RDRAM address's 2 KB page and shortened by the address's misalignment to 8
  * bytes, halfwords read from the cartridge, an odd remainder rounded up after the first block; the first block loses
  * as many bytes at its end as the address is misaligned (one more byte when it is one short of full), and the RDRAM
- * address is rounded up to 8 after each block. Not modelled: the repeated bytes at the very end of a page. */
+ * address is rounded up to 8 after each block. When the first address is in the last 8 bytes of its page, the next
+ * block (at the next page's start, aligned) is still shortened by that misalignment, and the rounding of the address
+ * after it skips as many bytes (n64-systemtest "DMA CART -> RDRAM (misaligned, end of page)"; "cross page", a first
+ * block cut further from the page's end, shows no such loss). */
 static void pi_dma_to_rdram(n64_machine *m, uint32_t *dram_p, uint32_t *cart_p, int32_t len)
 {
     uint8_t buf[128];
     uint32_t dram = *dram_p, cart = *cart_p;
     bool first = true;
+    int32_t carry = 0; /* the first block's misalignment, when the page's end cut that block */
     while (len > 0) {
         int32_t misalign = (int32_t)(dram & 7);
-        int32_t block = 128 - misalign;
+        int32_t block = 128 - (carry ? carry : misalign);
         int32_t to_page = 0x800 - (int32_t)(dram & 0x7FF);
-        if (block > to_page)
+        carry = 0;
+        if (block > to_page) {
             block = to_page;
+            if (first && to_page < 8)
+                carry = misalign;
+        }
         int32_t cur = len < block ? len : block;
         len -= cur;
         if (len & 1)
