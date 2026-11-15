@@ -551,20 +551,21 @@ static bool fetch_slow(n64_machine *m, uint64_t pc, uint32_t *ins)
  * every access still reads and writes memory, so the operations on data (fills, write backs) leave memory as it is,
  * while index / hit invalidates, store / load tag, fill and create dirty exclusive keep the tags the way the hardware
  * does (n64-systemtest "CACHE icache index invalidate ...", "CACHE dcache create dirty exclusive ..."). The hit
- * operations translate the address and can raise TLB exceptions; the index ones use its low bits only. */
-static void cache_op(n64_machine *m, int op, uint64_t va)
+ * operations translate the address and can raise TLB exceptions; the index ones use its low bits only. False when
+ * the translation raised (raise: false for lifted code, n64_rc_cache: then nothing is done). */
+static bool cache_op(n64_machine *m, int op, uint64_t va, bool raise)
 {
     n64_cpu *c = &m->cpu;
     bool dcache = (op & 3) == 1;
     if ((op & 3) > 1)
-        return; /* no secondary cache */
+        return true; /* no secondary cache */
     uint32_t *tag = dcache ? &c->dtag[(va >> 4) & 511] : &c->itag[(va >> 5) & 511];
     uint32_t valid = dcache ? 3u << 6 : 2u << 6; /* D: valid dirty (PState 3), I: valid (2) */
     int kind = op >> 2;
     uint32_t pa = 0;
     if (kind >= 3) { /* create dirty exclusive, the hit operations, fill */
-        if (!vtop(m, va, ACC_LOAD, &pa, true))
-            return;
+        if (!vtop(m, va, ACC_LOAD, &pa, raise))
+            return false;
     }
     uint32_t pfn = (pa >> 12) << 8;
     bool hit = (*tag & 0xC0u) && (*tag & 0x0FFFFF00u) == pfn;
@@ -598,6 +599,12 @@ static void cache_op(n64_machine *m, int op, uint64_t va)
     default: /* hit write back: memory is always current */
         break;
     }
+    return true;
+}
+
+int n64_rc_cache(n64_machine *m, int op, uint64_t va)
+{
+    return cache_op(m, op, va, false) ? 0 : 1;
 }
 
 /* ---- Arithmetic helpers ---------------------------------------------------------------------------------------- */
@@ -1224,7 +1231,7 @@ static N64_HOT_INLINE void exec(n64_machine *m, uint32_t ins)
             n64_cpu_exception(m, EXC_CPU, 0);
             return;
         }
-        cache_op(m, rt, g[rs] + (uint64_t)imm);
+        cache_op(m, rt, g[rs] + (uint64_t)imm, true);
         break;
     case 0x30: { /* LL */
         uint64_t a = g[rs] + (uint64_t)imm;

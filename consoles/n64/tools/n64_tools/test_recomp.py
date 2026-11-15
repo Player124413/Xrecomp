@@ -104,7 +104,7 @@ def test_libdragon_elf_in_rom():
     (0x44A21000, "dmtc1", "fmove"),
     (0x46221080, "fop", "fop"),
     (i_type(0x35, 1, 2, 8), "ldc1", "fmem"),
-    (i_type(0x2F, 1, 0x19, 0), "cache", "nop"),
+    (i_type(0x2F, 1, 0x19, 0), "cache", "cache"),
     (0x42000018, "cop0", "interp"),
     (i_type(0x30, 1, 2, 0), "ll", "interp"),
     (0x7C000000, "reserved", "interp"),

@@ -124,7 +124,7 @@ class Ins:
             out = (self.rs,)
         elif c == "fmove":
             out = (self.rt,) if n in ("mtc1", "dmtc1", "ctc1") else ()
-        elif c == "fmem":
+        elif c in ("fmem", "cache"):
             out = (self.rs,)
         return tuple(r for r in out if r)
 
@@ -244,7 +244,9 @@ def _decode(i):
     i.name = name
     if name in INTERP:
         i.cls = "interp"
-    elif name in ("cache", "sync"):
+    elif name == "cache":
+        i.cls = "cache"  # the core keeps the caches' tags (n64_rc_cache)
+    elif name == "sync":
         i.cls = "nop"
     elif name in LOADS:
         i.cls = "load"

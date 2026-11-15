@@ -96,6 +96,8 @@ class FnLifter:
             return fault
         if c == "nop":
             return ""
+        if c == "cache":
+            return "RC_CACHE(%d, %s, %s);" % (i.rt, ea, fault)
         if c == "alu":
             if (i.word >> 26) == 0:
                 sa = i.sa
