@@ -1,0 +1,3 @@
+# libdragon test ROM failures the core accepts (run_libdragon_tests.sh): test names, one per line.
+# The caches hold no data (n64_cpu.c cache_op): a line invalidated without write back cannot lose its writes.
+test_cache_invalidate

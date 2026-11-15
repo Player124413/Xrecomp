@@ -28,12 +28,22 @@ endif()
 #   n64_cheats_*      GameShark codes on the homebrew (n64_run --cheats, XBA-197)
 #   n64_systemtest    lemmy-64/n64-systemtest (MIT) built from source: every CPU / COP0 / TLB / COP1 / memory test
 #                     must pass but the known gaps listed in systemtest_known.txt (RSP / RDP tests only count with
-#                     the real modules)
+#                     the real modules); with the real RSP / RDP at least N64_SYSTEMTEST_PASS test values must pass
+#                     (XBA-202); n64_systemtest_full: the ROM with every test group (timing, cycle, cop0hazard,
+#                     quirks), at least N64_SYSTEMTEST_FULL_PASS
+#   n64_libdragon_tests libdragon's test ROM (Unlicense, XBA-202): every test passes but libdragon_known.txt, at least
+#                     N64_LIBDRAGON_PASS of them; on the Vulkan RDP too (_vulkan), and recompiled in lockstep (n64_rc_)
+#   n64_rsp_inval_instrs sauraen/rsp_inval_instrs (Unlicense, XBA-202): the RSP's invalid SPECIAL opcodes as measured on
+#                     hardware ("Test passed")
 # The ROM tests skip (exit 77) when their inputs are absent, so a CI job without Docker or network stays green.
 # They come from (repo root):
 #   tools/consoles/build_homebrew.sh n64 build/homebrew     -> N64_HOMEBREW_DIR (default build/homebrew/n64)
 #   tools/consoles/build_n64_systemtest.sh build/n64-systemtest -> N64_SYSTEMTEST (default
-#                                                              build/n64-systemtest/n64-systemtest.z64)
+#                                                              build/n64-systemtest/n64-systemtest.z64; and
+#                                                              n64-systemtest-full.z64, N64_SYSTEMTEST_FULL)
+#   tools/consoles/build_n64_libdragon_tests.sh build/n64-libdragon-tests -> N64_LIBDRAGON_TESTROM (default
+#                                                              build/n64-libdragon-tests/testrom_emu.z64), and
+#                                                              rsp_inval_instrs.z64 next to it
 if(WIN32)
     message(FATAL_ERROR "The console runtimes are POSIX-only (xbr_host)")
 endif()
@@ -140,6 +150,15 @@ endforeach()
 
 set(N64_SYSTEMTEST ${N64_REPO_ROOT}/build/n64-systemtest/n64-systemtest.z64 CACHE FILEPATH
     "n64-systemtest ROM (build_n64_systemtest.sh)")
+set(N64_SYSTEMTEST_FULL ${N64_REPO_ROOT}/build/n64-systemtest/n64-systemtest-full.z64 CACHE FILEPATH
+    "n64-systemtest ROM with every test group (build_n64_systemtest.sh)")
+set(N64_LIBDRAGON_TESTROM ${N64_REPO_ROOT}/build/n64-libdragon-tests/testrom_emu.z64 CACHE FILEPATH
+    "libdragon's test ROM (build_n64_libdragon_tests.sh)")
+# Pass-count thresholds of the open test ROMs (XBA-202), with the real RSP / RDP: a regression fails even in a test the
+# known-gap lists cover. Raise them with the core; lower only for a test proven wrong.
+set(N64_SYSTEMTEST_PASS 3716)       # of 3721 test values (base group): 5 need cached data
+set(N64_SYSTEMTEST_FULL_PASS 3726)  # of 3731 (base, timing, cycle, cop0hazard, poorly understood quirks)
+set(N64_LIBDRAGON_PASS 102)         # of 107 (4 skipped under emulation): test_cache_invalidate needs cached data
 set(N64_RT ${CMAKE_CURRENT_SOURCE_DIR}/../runtime)
 set(N64_HAVE_RCP OFF)
 if(EXISTS ${N64_RT}/n64_rsp.c AND EXISTS ${N64_RT}/n64_rdp.c)
@@ -205,6 +224,28 @@ if(TARGET n64_run)
     add_test(NAME n64_systemtest COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_systemtest.sh $<TARGET_FILE:n64_run>
              ${N64_SYSTEMTEST} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt ${N64_HAVE_RCP})
     set_tests_properties(n64_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    if(N64_HAVE_RCP)
+        set_tests_properties(n64_systemtest PROPERTIES ENVIRONMENT "N64_SYSTEMTEST_MIN_PASS=${N64_SYSTEMTEST_PASS}")
+        add_test(NAME n64_systemtest_full COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_systemtest.sh
+                 $<TARGET_FILE:n64_run> ${N64_SYSTEMTEST_FULL} ${CMAKE_CURRENT_SOURCE_DIR}/systemtest_known.txt ON)
+        set_tests_properties(n64_systemtest_full PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300
+                             ENVIRONMENT "N64_SYSTEMTEST_MIN_PASS=${N64_SYSTEMTEST_FULL_PASS}")
+        set(N64_LDT sh ${CMAKE_CURRENT_SOURCE_DIR}/run_libdragon_tests.sh $<TARGET_FILE:n64_run> ${N64_LIBDRAGON_TESTROM}
+            ${CMAKE_CURRENT_SOURCE_DIR}/libdragon_known.txt)
+        add_test(NAME n64_libdragon_tests COMMAND ${N64_LDT})
+        set_tests_properties(n64_libdragon_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 700
+                             ENVIRONMENT "N64_LIBDRAGON_MIN_PASS=${N64_LIBDRAGON_PASS}")
+        get_filename_component(N64_LDT_DIR ${N64_LIBDRAGON_TESTROM} DIRECTORY)
+        add_test(NAME n64_rsp_inval_instrs COMMAND sh ${N64_REPO_ROOT}/tools/consoles/expect_output.sh "Test passed after"
+                 sh ${CMAKE_CURRENT_SOURCE_DIR}/run_rom.sh $<TARGET_FILE:n64_run> ${N64_LDT_DIR}/rsp_inval_instrs.z64
+                 --tty --frames 3000 --quiet)
+        set_tests_properties(n64_rsp_inval_instrs PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+        if(TARGET n64_rdp_vk)
+            add_test(NAME n64_libdragon_tests_vulkan COMMAND ${N64_LDT})
+            set_tests_properties(n64_libdragon_tests_vulkan PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200
+                                 ENVIRONMENT "N64_LIBDRAGON_MIN_PASS=${N64_LIBDRAGON_PASS};RECOMP_N64_RDP=vulkan")
+        endif()
+    endif()
 
     # Static recompilation (N-1 XBA-169, N-2 XBA-170, N-3 XBA-171): each homebrew ROM lifted to C from the ROM alone
     # (n64_tools.recomp; its ELF only measures the discovery: >= 99 % of the function symbols found), built with the
@@ -231,6 +272,15 @@ if(TARGET n64_run)
                  ${N64_HAVE_RCP} ${N64_RC_WORK}/systemtest)
         set_tests_properties(n64_rc_systemtest PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600
                              ENVIRONMENT "PYTHON=${Python3_EXECUTABLE}")
+        if(N64_HAVE_RCP)
+            set_tests_properties(n64_rc_systemtest PROPERTIES
+                ENVIRONMENT "PYTHON=${Python3_EXECUTABLE};N64_SYSTEMTEST_MIN_PASS=${N64_SYSTEMTEST_PASS}")
+            add_test(NAME n64_rc_libdragon_tests COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/recomp_libdragon_tests.sh
+                     $<TARGET_FILE:n64_run> ${N64_LIBDRAGON_TESTROM} ${CMAKE_CURRENT_SOURCE_DIR}/libdragon_known.txt
+                     ${N64_RC_WORK}/libdragon_tests)
+            set_tests_properties(n64_rc_libdragon_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 3600
+                ENVIRONMENT "PYTHON=${Python3_EXECUTABLE};N64_LIBDRAGON_MIN_PASS=${N64_LIBDRAGON_PASS}")
+        endif()
         add_test(NAME n64_rc_fuzz COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/recomp_fuzz.py
                  --n64-run $<TARGET_FILE:n64_run> --work ${N64_RC_WORK}/fuzz --seeds 0-7 --frames 15 --insns 1500)
         set_tests_properties(n64_rc_fuzz PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
