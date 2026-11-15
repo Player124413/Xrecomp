@@ -154,7 +154,8 @@ static uint64_t pi_dma_ticks(n64_machine *m, uint32_t cart, uint32_t len)
 /* Cartridge -> RDRAM the way the PI does it (n64brew « PI DMA », checked by n64-systemtest): blocks of up to 128 bytes
  * through its buffer, each ending at the RDRAM address's 2 KB page and shortened by the address's misalignment to 8
  * bytes, halfwords read from the cartridge, an odd remainder rounded up after the first block; the first block loses
- * as many bytes at its end as the address is misaligned (one more byte when it is one short of full), and the RDRAM
+ * as many bytes at its end as the address is misaligned (one more byte when it is one short of a full 128 - misalign
+ * block, but not of one the page's end cut), and the RDRAM
  * address is rounded up to 8 after each block. When the first address is in the last 8 bytes of its page, the next
  * block (at the next page's start, aligned) is still shortened by that misalignment, and the rounding of the address
  * after it skips as many bytes (n64-systemtest "DMA CART -> RDRAM (misaligned, end of page)"; "cross page", a first
@@ -183,7 +184,8 @@ static void pi_dma_to_rdram(n64_machine *m, uint32_t *dram_p, uint32_t *cart_p, 
         cart_read(m, cart, buf, (uint32_t)rom_len);
         cart += (uint32_t)rom_len;
         if (first) {
-            if (cur == block - 1)
+            if (cur == block - 1 && block == 128 - misalign) /* not when the page's end cut it (libdragon's
+                                                              * test_dma_read_misalign: 31 bytes before a page end) */
                 cur++;
             cur -= misalign;
             if (cur < 0)
